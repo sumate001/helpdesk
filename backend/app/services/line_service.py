@@ -26,6 +26,22 @@ QUICK_REPLY_FOLLOWUP = {
     ]
 }
 
+# ปุ่มยืนยันตอน intake สรุปเสร็จ ก่อนเปิด ticket
+QUICK_REPLY_CONFIRM = {
+    "items": [
+        {
+            "type": "action",
+            "action": {"type": "message", "label": "เปิด Ticket ✅", "text": "เปิด Ticket ✅"},
+        },
+        {
+            "type": "action",
+            "action": {"type": "message", "label": "ยังไม่ต้อง ❌", "text": "ยังไม่ต้อง ❌"},
+        },
+    ]
+}
+
+_QUICK_REPLIES = {"followup": QUICK_REPLY_FOLLOWUP, "confirm": QUICK_REPLY_CONFIRM}
+
 
 def _headers() -> dict:
     return {
@@ -44,19 +60,26 @@ def verify_signature(body: bytes, signature: str) -> bool:
     return hmac.compare_digest(expected, signature or "")
 
 
-def _text_message(text: str, with_quick_reply: bool = False) -> dict:
+def _text_message(
+    text: str, with_quick_reply: bool = False, quick_reply: str | None = None
+) -> dict:
     msg = {"type": "text", "text": text}
-    if with_quick_reply:
+    if quick_reply and quick_reply in _QUICK_REPLIES:
+        msg["quickReply"] = _QUICK_REPLIES[quick_reply]
+    elif with_quick_reply:
         msg["quickReply"] = QUICK_REPLY_FOLLOWUP
     return msg
 
 
 async def reply(
-    reply_token: str, text: str, with_quick_reply: bool = False
+    reply_token: str,
+    text: str,
+    with_quick_reply: bool = False,
+    quick_reply: str | None = None,
 ) -> list[str]:
     payload = {
         "replyToken": reply_token,
-        "messages": [_text_message(text, with_quick_reply)],
+        "messages": [_text_message(text, with_quick_reply, quick_reply)],
     }
     return await _post("/message/reply", payload)
 

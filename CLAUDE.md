@@ -252,15 +252,19 @@ line_message_id  VARCHAR(100) UNIQUE NOT NULL  -- id จาก sentMessages[].id
 created_at       TIMESTAMP                     -- เก็บ 30 วันแล้วล้าง
 ```
 
-### Table: `group_sessions` — session ชั่วคราวต่อ (กลุ่ม, ผู้ใช้)
+### Table: `conversations` — multi-turn intake state (1-1 + กลุ่ม)
 ```sql
-id            SERIAL PRIMARY KEY
-source_id     VARCHAR(100) NOT NULL  -- groupId หรือ roomId
-line_user_id  VARCHAR(100) NOT NULL  -- LINE userId ของผู้แจ้ง
-ticket_id     INTEGER REFERENCES tickets(id)
-expires_at    TIMESTAMP NOT NULL     -- default GROUP_SESSION_MINUTES (10 นาที)
-updated_at    TIMESTAMP NOT NULL
--- UNIQUE(source_id, line_user_id)
+id              SERIAL PRIMARY KEY
+channel         VARCHAR(10) NOT NULL   -- user | group
+source_id       VARCHAR(100)           -- groupId/roomId (NULL ถ้า 1-1)
+line_user_id    VARCHAR(100) NOT NULL
+status          VARCHAR(10) NOT NULL   -- active | closed
+transcript      TEXT NOT NULL          -- JSON: [{role, content}, ...]
+pending_images  TEXT NOT NULL          -- JSON: รูปที่รอผูก ticket ตอนยังไม่เปิด
+ticket_id       INTEGER REFERENCES tickets(id)
+expires_at      TIMESTAMP NOT NULL     -- ต่ออายุทุก turn (CONVERSATION_MINUTES = 15)
+created_at      TIMESTAMP NOT NULL
+updated_at      TIMESTAMP NOT NULL
 ```
 
 ---
@@ -312,19 +316,29 @@ TK-YYYYMMDD-XXXX
 ตัวอย่าง: TK-20240615-0001
 ```
 
-### Group Chat Flow (กลุ่ม/ห้องหลายคน)
+### Intake Flow (multi-turn — ใช้ทั้ง 1-1 และกลุ่ม)
 
-ในกลุ่มบอทจะ "ตอบเมื่อถูกเรียกเท่านั้น" ผ่าน 3 ทาง:
+บอท **ไม่เปิด ticket จากข้อความเดียวทันที** แต่คุยเก็บข้อมูล/แก้ปัญหาก่อน ผ่าน `conversations`
+(`ai_service.intake_turn` ขับด้วย gemma4:12b, JSON action = ask|resolved|open):
+
+1. **แก้ L1 ก่อน** — ถามวินิจฉัยทีละข้อ + แนะนำให้ผู้ใช้ "ลองทำ" (restart, เช็คสาย ฯลฯ)
+2. ผู้ใช้บอกว่าหาย → `resolved`: เก็บ ticket สถานะ `ai_answered` (สถิติ) ปิด conversation
+3. แก้ไม่ได้/ต้องให้ IT → เก็บข้อมูลที่ขาด (อาการ, ตึก/ชั้น → อัปเดต `line_users`, เริ่มเมื่อไหร่, ขอรูป)
+4. ข้อมูลครบ → สรุป + ปุ่มยืนยัน `เปิด Ticket ✅ / ยังไม่ต้อง ❌` (`needs_confirm`)
+5. ผู้ใช้ยืนยัน → `open`: เปิด ticket (equipment/service → `pending_approval`, อื่นๆ → L2 `open`)
+   + แจ้งทีม IT + ผูกรูปจาก `pending_images` เข้า `ticket_attachments`
+
+conversation active ภายใน `CONVERSATION_MINUTES` (15 นาที) ต่ออายุทุก turn —
+ระหว่างนี้ข้อความ/รูปถัดมาของผู้ใช้คนเดิมถือว่าอยู่ในบทสนทนานี้ (ไม่ต้อง @ ซ้ำ)
+
+**ในกลุ่ม** บอทจะ "เริ่ม" บทสนทนาเมื่อถูกเรียกผ่าน 3 ทาง:
 1. `@mention` บอท
-2. **quote-reply** ข้อความบอท (เช็ก `quotedMessageId` เทียบกับตาราง `bot_messages`)
+2. **quote-reply** ข้อความบอท (เช็ก `quotedMessageId` เทียบ `bot_messages`)
 3. ข้อความขึ้นต้นด้วย `GROUP_TRIGGER_KEYWORDS` (เช่น `itadmin`)
 
-**รูปภาพในกลุ่ม** (เช่น error screenshot ที่ถ่ายไว้ — LINE แนบ caption ไม่ได้):
-บอทรับรูปเมื่อ (ก) quote-reply ข้อความบอทพร้อมรูป หรือ (ข) อยู่ใน `group_sessions`
-ที่เปิดไว้หลังเพิ่งเรียกบอท (default 10 นาที) จากนั้น:
-- ถ้า session มี ticket เปิดอยู่ → แนบรูปเข้า ticket เดิม
-- ถ้ายังไม่มี → **gemma4:12b อ่านรูป** (multimodal) วิเคราะห์ปัญหา → เปิด L2 ticket + แจ้งทีม IT
-- รูปถูก download เก็บลง MinIO และผูกเป็น `ticket_attachments`
+**รูปภาพ** (เช่น error screenshot — LINE แนบ caption ไม่ได้): 1-1 รับเสมอ, ในกลุ่มรับเมื่ออยู่ใน
+บทสนทนา active หรือ quote-reply ข้อความบอท → **gemma อ่านรูป** (multimodal) ป้อนเข้า intake
+ระหว่าง intake รูปเก็บใน MinIO ชั่วคราว (`pending_images`) แล้วผูกเข้า ticket ตอนเปิดจริง
 
 ---
 

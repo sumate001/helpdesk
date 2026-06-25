@@ -42,8 +42,9 @@ class Settings(BaseSettings):
     # คำขึ้นต้นที่ใช้เรียกบอทในกลุ่ม (คั่นด้วย comma) — ใช้แทน/ร่วมกับการ @ mention
     GROUP_TRIGGER_KEYWORDS: str = "itadmin,@itadmin,/itadmin"
 
-    # หลังเรียกบอทในกลุ่ม → เปิด session ชั่วคราว รูปที่ส่งตามมาในช่วงนี้ถือว่าคุยกับบอท
-    GROUP_SESSION_MINUTES: int = 10
+    # multi-turn intake — หลังเริ่มคุย บอทเก็บข้อมูล/แก้ปัญหาก่อนเปิด ticket
+    # conversation จะ active ภายในกี่นาที (ต่ออายุทุกครั้งที่ผู้ใช้ตอบ)
+    CONVERSATION_MINUTES: int = 15
 
     @property
     def group_trigger_list(self) -> list[str]:
