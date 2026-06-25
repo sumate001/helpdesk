@@ -1,0 +1,62 @@
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.dev
+    volumes:
+      - ./backend:/app
+    ports:
+      - "8000:8000"
+    env_file: .env.dev
+    depends_on:
+      - postgres
+      - minio
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.dev
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    ports:
+      - "3000:3000"
+    env_file: .env.dev
+    command: npm run dev -- --host
+
+  postgres:
+    image: postgres:15-alpine
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: itticket
+      POSTGRES_PASSWORD: itticket
+      POSTGRES_DB: it_ticket_db
+    volumes:
+      - postgres_dev_data:/var/lib/postgresql/data
+
+  minio:
+    image: minio/minio
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    volumes:
+      - minio_dev_data:/data
+    command: server /data --console-address ":9001"
+
+  ngrok:
+    image: ngrok/ngrok:latest
+    ports:
+      - "4040:4040"
+    env_file: .env.dev
+    command: http backend:8000
+    depends_on:
+      - backend
+
+volumes:
+  postgres_dev_data:
+  minio_dev_data:
