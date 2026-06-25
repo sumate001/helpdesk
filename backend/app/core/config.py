@@ -22,7 +22,7 @@ class Settings(BaseSettings):
 
     # Ollama
     OLLAMA_BASE_URL: str = "http://100.94.37.18:11434"
-    OLLAMA_MODEL: str = "qwen3:8b"
+    OLLAMA_MODEL: str = "gemma4:12b"
 
     # MinIO
     MINIO_ENDPOINT: str = "minio:9000"
@@ -41,6 +41,9 @@ class Settings(BaseSettings):
 
     # คำขึ้นต้นที่ใช้เรียกบอทในกลุ่ม (คั่นด้วย comma) — ใช้แทน/ร่วมกับการ @ mention
     GROUP_TRIGGER_KEYWORDS: str = "itadmin,@itadmin,/itadmin"
+
+    # หลังเรียกบอทในกลุ่ม → เปิด session ชั่วคราว รูปที่ส่งตามมาในช่วงนี้ถือว่าคุยกับบอท
+    GROUP_SESSION_MINUTES: int = 10
 
     @property
     def group_trigger_list(self) -> list[str]:

@@ -10,6 +10,7 @@ from app.services import (
     ai_service,
     bot_message_service,
     followup_service,
+    group_session_service,
     line_service,
     storage_service,
     ticket_service,
@@ -87,18 +88,38 @@ async def _handle_event(db: Session, event: dict) -> None:
             await _handle_image(db, line_user_id, message.get("id"))
         return
 
-    # แชทกลุ่ม/ห้องหลายคน → ตอบเมื่อถูก @ เรียก, quote-reply ข้อความบอท, หรือขึ้นต้นด้วยคำเรียกบอท
-    if source_type in ("group", "room") and mtype == "text":
-        text = message.get("text", "")
-        if _bot_mentioned(message):
-            await _handle_group_query(db, line_user_id, _strip_self_mentions(message), reply_token)
-        elif bot_message_service.is_bot_message(db, message.get("quotedMessageId")):
-            # user กด reply ข้อความบอทเพื่อคุยต่อ → ถือว่าคุยกับบอท
-            await _handle_group_query(db, line_user_id, _strip_self_mentions(message), reply_token)
-        else:
-            query = _strip_trigger_keyword(text)
-            if query is not None:
-                await _handle_group_query(db, line_user_id, query, reply_token)
+    # แชทกลุ่ม/ห้องหลายคน
+    source_id = source.get("groupId") or source.get("roomId")
+    if source_type in ("group", "room") and source_id:
+        # ข้อความ → ตอบเมื่อถูก @ เรียก, quote-reply ข้อความบอท, หรือขึ้นต้นด้วยคำเรียกบอท
+        if mtype == "text":
+            text = message.get("text", "")
+            triggered = False
+            ticket = None
+            if _bot_mentioned(message):
+                triggered = True
+                ticket = await _handle_group_query(
+                    db, line_user_id, _strip_self_mentions(message), reply_token
+                )
+            elif bot_message_service.is_bot_message(db, message.get("quotedMessageId")):
+                # user กด reply ข้อความบอทเพื่อคุยต่อ → ถือว่าคุยกับบอท
+                triggered = True
+                ticket = await _handle_group_query(
+                    db, line_user_id, _strip_self_mentions(message), reply_token
+                )
+            else:
+                query = _strip_trigger_keyword(text)
+                if query is not None:
+                    triggered = True
+                    ticket = await _handle_group_query(db, line_user_id, query, reply_token)
+            # เปิด session ไว้ → รูปที่ส่งตามมาในกลุ่มถือว่าเป็นของบทสนทนานี้
+            if triggered:
+                group_session_service.touch(
+                    db, source_id, line_user_id, ticket.id if ticket else None
+                )
+        # รูป → รับเมื่อ quote-reply ข้อความบอท หรืออยู่ใน session ที่เพิ่งเรียกบอท
+        elif mtype == "image":
+            await _handle_group_image(db, source_id, line_user_id, message, reply_token)
 
 
 def _strip_trigger_keyword(text: str) -> str | None:
@@ -135,11 +156,14 @@ def _strip_self_mentions(message: dict) -> str:
 
 async def _handle_group_query(
     db: Session, line_user_id: str, query: str, reply_token: str
-) -> None:
-    """ตอบคำถามในกลุ่มเมื่อถูก @ เรียก — AI ตอบเลย, ถ้าต้องเปิดงานก็เปิด ticket ให้."""
+) -> Ticket | None:
+    """ตอบคำถามในกลุ่มเมื่อถูก @ เรียก — AI ตอบเลย, ถ้าต้องเปิดงานก็เปิด ticket ให้.
+
+    คืน Ticket ที่เปิด (ถ้ามี) เพื่อให้ caller ผูกเข้า session — ไม่เปิดคืน None.
+    """
     if not query:
         await _reply(db, reply_token, "พิมพ์คำถามต่อจาก @ ได้เลยครับ 🙂")
-        return
+        return None
 
     lu = ticket_service.upsert_line_user(db, line_user_id)
     db.commit()
@@ -178,9 +202,10 @@ async def _handle_group_query(
             reply_token,
             f"{result['reply']}\n\nเปิด Ticket ให้แล้วครับ: {ticket.ticket_no}",
         )
-    else:
-        # ตอบได้ด้วยคำแนะนำ → ตอบเลย ไม่เปิด ticket
-        await _reply(db, reply_token, result["reply"])
+        return ticket
+    # ตอบได้ด้วยคำแนะนำ → ตอบเลย ไม่เปิด ticket
+    await _reply(db, reply_token, result["reply"])
+    return None
 
 
 async def _latest_open_ticket(db: Session, line_user_db_id: int) -> Ticket | None:
@@ -303,6 +328,27 @@ async def _handle_text(
         )
 
 
+def _store_attachment(
+    db: Session, ticket: Ticket, message_id: str, content: bytes
+) -> None:
+    """อัปโหลดรูปลง MinIO + บันทึก attachment ผูกกับ ticket."""
+    object_name = f"{ticket.ticket_no}/{message_id}.jpg"
+    path = storage_service.upload_bytes(object_name, content, "image/jpeg")
+    from app.models.ticket_attachment import TicketAttachment
+
+    db.add(
+        TicketAttachment(
+            ticket_id=ticket.id,
+            file_name=f"{message_id}.jpg",
+            file_path=path,
+            mime_type="image/jpeg",
+            file_size=len(content),
+            line_message_id=message_id,
+        )
+    )
+    db.commit()
+
+
 async def _handle_image(db: Session, line_user_id: str, message_id: str) -> None:
     lu = ticket_service.upsert_line_user(db, line_user_id)
     db.commit()
@@ -311,20 +357,67 @@ async def _handle_image(db: Session, line_user_id: str, message_id: str) -> None
         return
     try:
         content = await line_service.get_message_content(message_id)
-        object_name = f"{ticket.ticket_no}/{message_id}.jpg"
-        path = storage_service.upload_bytes(object_name, content, "image/jpeg")
-        from app.models.ticket_attachment import TicketAttachment
-
-        db.add(
-            TicketAttachment(
-                ticket_id=ticket.id,
-                file_name=f"{message_id}.jpg",
-                file_path=path,
-                mime_type="image/jpeg",
-                file_size=len(content),
-                line_message_id=message_id,
-            )
-        )
-        db.commit()
+        _store_attachment(db, ticket, message_id, content)
     except Exception:  # noqa: BLE001
         logger.exception("failed to store image attachment")
+
+
+async def _handle_group_image(
+    db: Session, source_id: str, line_user_id: str, message: dict, reply_token: str
+) -> None:
+    """รูปในกลุ่ม — รับเมื่อ quote-reply ข้อความบอท หรืออยู่ใน session ที่เพิ่งเรียกบอท.
+
+    gemma อ่านรูป (error screenshot) → เปิด/แนบ ticket แล้วแจ้งทีม IT.
+    """
+    message_id = message.get("id")
+    quoted_is_bot = bot_message_service.is_bot_message(db, message.get("quotedMessageId"))
+    session = group_session_service.get_active(db, source_id, line_user_id)
+    if not quoted_is_bot and session is None:
+        return  # รูปนี้ไม่ได้ตั้งใจคุยกับบอท → ไม่ยุ่ง
+    if message_id is None:
+        return
+
+    try:
+        content = await line_service.get_message_content(message_id)
+    except Exception:  # noqa: BLE001
+        logger.exception("failed to download group image")
+        return
+
+    profile = await line_service.get_profile(line_user_id)
+    lu = ticket_service.upsert_line_user(db, line_user_id, profile)
+    db.commit()
+
+    # ถ้า session มี ticket เปิดอยู่แล้ว → แนบรูปเข้า ticket เดิม (ไม่เปิดใหม่)
+    if session and session.ticket_id:
+        ticket = db.get(Ticket, session.ticket_id)
+        if ticket and ticket.status != "closed":
+            _store_attachment(db, ticket, message_id, content)
+            await _reply(
+                db,
+                reply_token,
+                f"รับรูปแล้วครับ 📎 แนบเข้า Ticket {ticket.ticket_no} ให้ทีม IT แล้วครับ",
+            )
+            group_session_service.touch(db, source_id, line_user_id, ticket.id)
+            return
+
+    # ยังไม่มี ticket → ให้ gemma อ่านรูปแล้วเปิด ticket ใหม่
+    result = await ai_service.classify_and_respond("", images=[content])
+    ticket = ticket_service.create_ticket(
+        db,
+        title=result["title"],
+        description=result["reply"],
+        category=result["category"],
+        ticket_type="L2",
+        priority=result["priority"],
+        status="open",
+        line_user_id=lu.id,
+        ai_response=result["reply"],
+    )
+    _store_attachment(db, ticket, message_id, content)
+    await _notify_group(db, ticket_service.group_notify_text(ticket))
+    await _reply(
+        db,
+        reply_token,
+        f"{result['reply']}\n\nรับเรื่องแล้วครับ เปิด Ticket {ticket.ticket_no} ส่งทีม IT แล้วครับ 🔧",
+    )
+    group_session_service.touch(db, source_id, line_user_id, ticket.id)

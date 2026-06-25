@@ -7,9 +7,11 @@ from app.models.ticket_comment import TicketComment
 from app.models.ticket_followup import TicketFollowup
 from app.models.equipment_request import EquipmentRequest
 from app.models.bot_message import BotMessage
+from app.models.group_session import GroupSession
 
 __all__ = [
     "BotMessage",
+    "GroupSession",
     "User",
     "LineUser",
     "SLAPolicy",

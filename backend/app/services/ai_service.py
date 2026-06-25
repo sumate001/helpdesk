@@ -1,4 +1,8 @@
-"""Ollama qwen3:8b integration — classify L1/L2 และสร้าง first response ภาษาไทย."""
+"""Ollama gemma4:12b integration — classify L1/L2 และสร้าง first response ภาษาไทย.
+
+gemma4:12b เป็น multimodal — รับรูปได้ ใช้ดู error screenshot ที่ผู้ใช้ส่งมาในกลุ่ม.
+"""
+import base64
 import json
 import logging
 
@@ -35,13 +39,19 @@ equipment_request และ service_request ให้ถือว่า needs_ti
 {"needs_ticket":true,"category":"...","priority":"...","title":"หัวข้อสั้นๆ","reply":"ข้อความตอบผู้ใช้ภาษาไทย กระชับ สุภาพ — ถ้า needs_ticket=false ให้ใส่วิธีแก้จริง","item_name":"ชื่ออุปกรณ์ (เฉพาะ equipment_request)","quantity":1}"""
 
 
-async def _ollama_chat(system: str, user: str) -> str:
+async def _ollama_chat(
+    system: str, user: str, images: list[bytes] | None = None
+) -> str:
     url = f"{settings.OLLAMA_BASE_URL}/api/chat"
+    user_msg: dict = {"role": "user", "content": user}
+    if images:
+        # Ollama รับรูปเป็น base64 ใน field images ของ message
+        user_msg["images"] = [base64.b64encode(b).decode() for b in images]
     payload = {
         "model": settings.OLLAMA_MODEL,
         "messages": [
             {"role": "system", "content": system},
-            {"role": "user", "content": user},
+            user_msg,
         ],
         "stream": False,
         "format": "json",
@@ -77,10 +87,23 @@ def _as_bool(value) -> bool:
     return str(value).strip().lower() in {"true", "1", "yes"}
 
 
-async def classify_and_respond(message: str) -> dict:
-    """คืน dict: needs_ticket, category, priority, title, reply (+ item_name/quantity)."""
+IMAGE_ONLY_PROMPT = (
+    "ผู้ใช้ส่งรูปภาพปัญหา IT มาให้ (มักเป็น error screenshot หรือรูปอุปกรณ์เสีย) "
+    "โดยไม่มีข้อความประกอบ กรุณาดูรูปแล้ววิเคราะห์ว่าเป็นปัญหาอะไร "
+    "ใน reply ให้สรุปสิ่งที่เห็นในรูปและปัญหาที่น่าจะเป็น"
+)
+
+
+async def classify_and_respond(
+    message: str, images: list[bytes] | None = None
+) -> dict:
+    """คืน dict: needs_ticket, category, priority, title, reply (+ item_name/quantity).
+
+    images: ถ้ามี → ส่งให้ gemma อ่านรูป (เช่น error screenshot จากกลุ่ม).
+    """
+    user_text = message.strip() if message and message.strip() else IMAGE_ONLY_PROMPT
     try:
-        raw = await _ollama_chat(CLASSIFY_SYSTEM_PROMPT, message)
+        raw = await _ollama_chat(CLASSIFY_SYSTEM_PROMPT, user_text, images)
         result = json.loads(raw)
     except (httpx.HTTPError, json.JSONDecodeError, KeyError) as exc:
         logger.warning("AI classify failed, fallback to ticket: %s", exc)
@@ -92,7 +115,7 @@ async def classify_and_respond(message: str) -> dict:
     if result.get("priority") not in VALID_PRIORITIES:
         result["priority"] = "medium"
     result.setdefault("reply", "ขอบคุณที่แจ้งมานะครับ ทีม IT จะดำเนินการให้ครับ")
-    result["title"] = (result.get("title") or message[:80])[:255]
+    result["title"] = (result.get("title") or message[:80] or "ปัญหาจากรูปภาพที่แจ้ง")[:255]
 
     result["needs_ticket"] = _as_bool(result.get("needs_ticket"))
     # บาง category ต้องเปิด ticket เสมอ ไม่ว่า AI จะตอบยังไง

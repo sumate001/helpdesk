@@ -14,7 +14,7 @@
        ↓
 [FastAPI Webhook]
        ↓
-[AI Classify: L1 / L2]  ← qwen3:8b via Ollama
+[AI Classify: L1 / L2]  ← gemma4:12b via Ollama
       ↙              ↘
    L1                  L2
 [AI ตอบ]          [เปิด Ticket]
@@ -53,7 +53,7 @@
 |---|---|
 | Line Integration | Line Messaging API (OA Webhook + Group Notify) |
 | Backend | FastAPI + Python 3.11 |
-| AI Classify & Response | qwen3:8b via Ollama (http://100.94.37.18:11434) |
+| AI Classify & Response | gemma4:12b via Ollama (http://100.94.37.18:11434) |
 | Database | PostgreSQL |
 | ORM | SQLAlchemy 2.0 + Alembic |
 | Auth | JWT (IT Staff login) |
@@ -101,7 +101,7 @@ line-it-ticket/
 │       │   └── reports.py         # Dashboard stats
 │       └── services/
 │           ├── line_service.py    # Line Messaging API calls
-│           ├── ai_service.py      # Ollama qwen3:8b integration
+│           ├── ai_service.py      # Ollama gemma4:12b integration
 │           ├── ticket_service.py  # ticket business logic
 │           ├── sla_service.py     # SLA calculation + breach check
 │           ├── followup_service.py # follow-up scheduler jobs
@@ -245,6 +245,24 @@ approved_by   INTEGER REFERENCES users(id)
 approved_at   TIMESTAMP
 ```
 
+### Table: `bot_messages` — message id ที่บอทส่ง (ใช้ดู quote-reply)
+```sql
+id               SERIAL PRIMARY KEY
+line_message_id  VARCHAR(100) UNIQUE NOT NULL  -- id จาก sentMessages[].id
+created_at       TIMESTAMP                     -- เก็บ 30 วันแล้วล้าง
+```
+
+### Table: `group_sessions` — session ชั่วคราวต่อ (กลุ่ม, ผู้ใช้)
+```sql
+id            SERIAL PRIMARY KEY
+source_id     VARCHAR(100) NOT NULL  -- groupId หรือ roomId
+line_user_id  VARCHAR(100) NOT NULL  -- LINE userId ของผู้แจ้ง
+ticket_id     INTEGER REFERENCES tickets(id)
+expires_at    TIMESTAMP NOT NULL     -- default GROUP_SESSION_MINUTES (10 นาที)
+updated_at    TIMESTAMP NOT NULL
+-- UNIQUE(source_id, line_user_id)
+```
+
 ---
 
 ## Core Business Logic
@@ -293,6 +311,20 @@ User แจ้งขอ → AI รับเรื่อง → เปิด Tick
 TK-YYYYMMDD-XXXX
 ตัวอย่าง: TK-20240615-0001
 ```
+
+### Group Chat Flow (กลุ่ม/ห้องหลายคน)
+
+ในกลุ่มบอทจะ "ตอบเมื่อถูกเรียกเท่านั้น" ผ่าน 3 ทาง:
+1. `@mention` บอท
+2. **quote-reply** ข้อความบอท (เช็ก `quotedMessageId` เทียบกับตาราง `bot_messages`)
+3. ข้อความขึ้นต้นด้วย `GROUP_TRIGGER_KEYWORDS` (เช่น `itadmin`)
+
+**รูปภาพในกลุ่ม** (เช่น error screenshot ที่ถ่ายไว้ — LINE แนบ caption ไม่ได้):
+บอทรับรูปเมื่อ (ก) quote-reply ข้อความบอทพร้อมรูป หรือ (ข) อยู่ใน `group_sessions`
+ที่เปิดไว้หลังเพิ่งเรียกบอท (default 10 นาที) จากนั้น:
+- ถ้า session มี ticket เปิดอยู่ → แนบรูปเข้า ticket เดิม
+- ถ้ายังไม่มี → **gemma4:12b อ่านรูป** (multimodal) วิเคราะห์ปัญหา → เปิด L2 ticket + แจ้งทีม IT
+- รูปถูก download เก็บลง MinIO และผูกเป็น `ticket_attachments`
 
 ---
 
@@ -358,7 +390,7 @@ LINE_GROUP_IT_ID=              # Group ID สำหรับ notify IT staff
 
 # Ollama (A5000 Server — ใช้ LAN IP ตรง latency ต่ำกว่า Tailscale)
 OLLAMA_BASE_URL=http://100.94.37.18:11434
-OLLAMA_MODEL=qwen3:8b
+OLLAMA_MODEL=gemma4:12b
 
 # MinIO
 MINIO_ENDPOINT=minio:9000
