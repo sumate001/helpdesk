@@ -195,8 +195,12 @@ def _attach_pending_images(db: Session, conv: Conversation, ticket: Ticket) -> N
         )
 
 
-def _update_location(db: Session, lu: LineUser, result: dict) -> None:
+def _update_user_info(db: Session, lu: LineUser, result: dict) -> None:
+    """บันทึกชื่อ/อาคาร/ชั้น ที่เก็บได้ระหว่าง intake ลง line_users."""
     changed = False
+    if result.get("full_name"):
+        lu.display_name = str(result["full_name"])[:100]
+        changed = True
     if result.get("building"):
         lu.building = str(result["building"])[:100]
         changed = True
@@ -205,6 +209,15 @@ def _update_location(db: Session, lu: LineUser, result: dict) -> None:
         changed = True
     if changed:
         db.commit()
+
+
+def _known_info(lu: LineUser) -> dict:
+    """ข้อมูลผู้ใช้ที่มีอยู่แล้ว → ส่งให้ AI ไม่ถามซ้ำ."""
+    return {
+        "full_name": lu.display_name,
+        "building": lu.building,
+        "floor": lu.floor,
+    }
 
 
 def _create_ticket_from_intake(
@@ -249,7 +262,7 @@ async def _run_intake(
         db, conv, "user", user_text.strip() or "[ผู้ใช้ส่งรูปภาพ]"
     )
     history = conversation_service.get_transcript(conv)
-    result = await ai_service.intake_turn(history, images=images)
+    result = await ai_service.intake_turn(history, images=images, known_info=_known_info(lu))
     conversation_service.append_message(db, conv, "assistant", result["reply"])
 
     action = result["action"]
@@ -263,7 +276,7 @@ async def _run_intake(
         # แก้ได้จากคำแนะนำ → เก็บเป็น ticket สถานะ ai_answered ไว้ทำสถิติ ไม่แจ้ง IT
         ticket = _create_ticket_from_intake(db, lu, result, "ai_answered", "L1")
         _attach_pending_images(db, conv, ticket)
-        _update_location(db, lu, result)
+        _update_user_info(db, lu, result)
         conversation_service.close(db, conv, ticket.id)
         await _reply(db, reply_token, result["reply"])
         return
@@ -274,7 +287,7 @@ async def _run_intake(
     ticket_type = result.get("type") or ("L1" if is_approval else "L2")
     ticket = _create_ticket_from_intake(db, lu, result, status, ticket_type)
     _attach_pending_images(db, conv, ticket)
-    _update_location(db, lu, result)
+    _update_user_info(db, lu, result)
     conversation_service.close(db, conv, ticket.id)
 
     db.refresh(ticket)
