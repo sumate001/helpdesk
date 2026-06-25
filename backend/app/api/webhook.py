@@ -15,6 +15,7 @@ from app.services import (
     conversation_service,
     followup_service,
     line_service,
+    rag_service,
     storage_service,
     ticket_service,
 )
@@ -123,6 +124,12 @@ def _bot_mentioned(message: dict) -> bool:
     """bot ถูก @ เรียกในข้อความกลุ่มหรือไม่ (Line แนบ mention.mentionees[].isSelf)."""
     mentionees = (message.get("mention") or {}).get("mentionees") or []
     return any(m.get("isSelf") for m in mentionees)
+
+
+def _mentions_others_only(message: dict) -> bool:
+    """ข้อความ @ เรียกคนอื่นในกลุ่ม โดยไม่ได้เรียกบอท → ชัดเจนว่าคุยกับคนอื่น."""
+    mentionees = (message.get("mention") or {}).get("mentionees") or []
+    return bool(mentionees) and not any(m.get("isSelf") for m in mentionees)
 
 
 def _strip_self_mentions(message: dict) -> str:
@@ -256,13 +263,31 @@ async def _run_intake(
     reply_token: str,
     user_text: str,
     images: list[bytes] | None,
+    allow_ignore: bool = False,
 ) -> None:
-    """เดินบทสนทนา intake หนึ่ง turn แล้วทำตาม action (ask/resolved/open)."""
-    conversation_service.append_message(
-        db, conv, "user", user_text.strip() or "[ผู้ใช้ส่งรูปภาพ]"
+    """เดินบทสนทนา intake หนึ่ง turn แล้วทำตาม action (ask/resolved/open/ignore)."""
+    msg = user_text.strip() or "[ผู้ใช้ส่งรูปภาพ]"
+    # ประเมินก่อน "ยังไม่" commit ข้อความเข้า transcript — เผื่อ AI ตัดสินว่า ignore
+    candidate_history = conversation_service.get_transcript(conv) + [
+        {"role": "user", "content": msg}
+    ]
+    # RAG: ดึงความรู้ระบบ/นโยบาย IT ที่เกี่ยวกับข้อความผู้ใช้ (ล่มก็ปล่อยว่าง ไม่พัง intake)
+    kb_context = ""
+    if user_text.strip():
+        try:
+            kb_context = await rag_service.retrieve_context(db, user_text.strip())
+        except Exception:  # noqa: BLE001
+            logger.exception("RAG retrieve failed")
+    result = await ai_service.intake_turn(
+        candidate_history, images=images, known_info=_known_info(lu),
+        allow_ignore=allow_ignore, kb_context=kb_context,
     )
-    history = conversation_service.get_transcript(conv)
-    result = await ai_service.intake_turn(history, images=images, known_info=_known_info(lu))
+
+    if result["action"] == "ignore":
+        # ข้อความนี้คุยกับคนอื่นในกลุ่ม ไม่ใช่กับบอท → ไม่ตอบ ไม่บันทึก ไม่ต่ออายุ conversation
+        return
+
+    conversation_service.append_message(db, conv, "user", msg)
     conversation_service.append_message(db, conv, "assistant", result["reply"])
 
     action = result["action"]
@@ -406,19 +431,30 @@ async def _handle_group_text(
     conv = conversation_service.get_active(db, "group", source_id, line_user_id)
     text = message.get("text", "")
 
+    # บอทถูกเรียกตรงๆ ไหม (@mention / quote-reply บอท / keyword) → addressed ไม่ใช่ None
+    addressed = _group_trigger_query(db, message)
+
     if conv is None:
         # ยังไม่มีบทสนทนา → ต้องถูกเรียกก่อนถึงเริ่ม
-        query = _group_trigger_query(db, message)
-        if query is None:
+        if addressed is None:
             return
-        text = query
+        text = addressed
+    elif addressed is not None:
+        # คุยต่อ + เรียกบอทตรงๆ → ตัดคำเรียกออก เหลือคำถามจริง
+        text = addressed or text
+    elif _mentions_others_only(message):
+        # คุยต่อ แต่ @ เรียกคนอื่นในกลุ่ม → ชัดเจนว่าไม่ได้คุยกับบอท ข้ามเลย ไม่ต้องเรียก AI
+        return
+
+    # คุยต่อโดยไม่ได้เรียกบอทตรงๆ → ให้ AI ตัดสินว่าข้อความนี้คุยกับบอทหรือกับคนอื่นในกลุ่ม
+    allow_ignore = conv is not None and addressed is None
 
     profile = await line_service.get_profile(line_user_id)
     lu = ticket_service.upsert_line_user(db, line_user_id, profile)
     db.commit()
     if conv is None:
         conv = conversation_service.start(db, "group", source_id, line_user_id)
-    await _run_intake(db, conv, lu, reply_token, text, None)
+    await _run_intake(db, conv, lu, reply_token, text, None, allow_ignore=allow_ignore)
 
 
 async def _handle_group_image(

@@ -5,6 +5,7 @@ import Dashboard from "./pages/Dashboard";
 import TicketList from "./pages/TicketList";
 import TicketDetail from "./pages/TicketDetail";
 import Reports from "./pages/Reports";
+import KnowledgeBase from "./pages/KnowledgeBase";
 
 function NavLink({ to, children }) {
   const { pathname } = useLocation();
@@ -31,6 +32,7 @@ function Layout({ children }) {
           <NavLink to="/">ภาพรวม</NavLink>
           <NavLink to="/tickets">Tickets</NavLink>
           <NavLink to="/reports">รายงาน</NavLink>
+          <NavLink to="/kb">คลังความรู้</NavLink>
           <button
             onClick={logout}
             className="ml-auto text-sm text-slate-500 hover:text-slate-800"
@@ -58,6 +60,7 @@ export default function App() {
       <Route path="/tickets" element={<Protected><TicketList /></Protected>} />
       <Route path="/tickets/:id" element={<Protected><TicketDetail /></Protected>} />
       <Route path="/reports" element={<Protected><Reports /></Protected>} />
+      <Route path="/kb" element={<Protected><KnowledgeBase /></Protected>} />
     </Routes>
   );
 }

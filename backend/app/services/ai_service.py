@@ -181,6 +181,8 @@ B) ต้องให้ทีม IT ลงมือ (L2) หรือเป็�
 ห้ามถามทีละข้อหลายรอบ — ถามครั้งเดียวให้ครบ
 
 เมื่อได้ข้อมูลครบ → สรุปสั้นๆ แล้วถามยืนยันเปิด Ticket (action="ask", needs_confirm=true)
+*** กฎสำคัญ: ทุกครั้งที่ reply ของคุณ "เอ่ยถึงการเปิดเคส/ถามว่าจะเปิด Ticket ให้ไหม/สรุปเรื่องเพื่อเตรียมเปิด" ต้องตั้ง needs_confirm=true ในข้อความเดียวกันนั้นเสมอ — ห้ามสรุปแล้วถามยืนยันโดยปล่อย needs_confirm=false (ปุ่มยืนยันจะไม่ขึ้น ผู้ใช้ต้องทวงซ้ำ ซึ่งผิด) ***
+ห้ามแยก "สรุป" กับ "ปุ่มยืนยัน" เป็นคนละ turn — ต้องอยู่ใน turn เดียวกัน
 ผู้ใช้ยืนยัน (เช่น "เปิดเลย","ใช่",กดปุ่ม) → action="open"
 ผู้ใช้บอกว่าหายเองแล้ว → action="resolved"
 
@@ -199,6 +201,31 @@ priority: low, medium, high, critical | type: L1 หรือ L2
 - full_name/building/floor ใส่เมื่อทราบ (จากผู้ใช้หรือจากข้อมูลที่ทราบแล้ว) ไม่งั้น null"""
 
 VALID_ACTIONS = {"ask", "resolved", "open"}
+
+# วลีที่บ่งว่า reply กำลัง "สรุป + ขอยืนยันเปิดเคส" → ควรขึ้นปุ่มยืนยันเสมอ
+_CONFIRM_HINTS = (
+    "เปิด ticket",
+    "เปิดเคส",
+    "เปิดเรื่อง",
+    "เปิด ticket ให้",
+    "ยืนยัน",
+    "เปิดให้ไหม",
+    "เปิดเลยไหม",
+    "ดำเนินการเปิด",
+    "open ticket",
+)
+
+
+def _looks_like_confirm_request(reply: str) -> bool:
+    low = (reply or "").lower()
+    return any(hint in low for hint in _CONFIRM_HINTS)
+
+# ต่อท้าย system prompt เฉพาะแชทกลุ่ม — ให้บอทประเมินว่าข้อความล่าสุด "คุยกับบอท" จริงไหม
+IGNORE_BLOCK = """
+
+[บริบทแชทกลุ่ม] ข้อความนี้มาจากห้องแชทกลุ่มที่มีหลายคนคุยกัน ก่อนตอบให้ประเมินก่อนว่า "ข้อความล่าสุดของผู้ใช้ กำลังคุยกับคุณ (บอท IT) เรื่องปัญหาที่กำลังช่วยอยู่หรือไม่":
+- ถ้าข้อความล่าสุดดูเหมือนคุยกับคนอื่นในกลุ่ม คุยเล่น ทักทาย หรือเปลี่ยนเรื่องไปเรื่องที่ไม่เกี่ยวกับปัญหา IT ที่กำลังช่วย → action="ignore" (ปล่อยผ่าน ไม่ต้องตอบ ไม่ต้องสนใจ)
+- ถ้ายังเป็นการคุยกับคุณเรื่องที่กำลังช่วยอยู่ (ตอบคำถามคุณ ให้ข้อมูลเพิ่ม ยืนยัน ฯลฯ) → ตอบตามปกติ"""
 
 
 def _intake_fallback() -> dict:
@@ -230,17 +257,34 @@ def _known_info_block(known: dict | None) -> str:
     return "\n\nข้อมูลผู้ใช้ที่ทราบแล้ว (ห้ามถามซ้ำ ใช้ค่านี้ได้เลย):\n" + "\n".join(lines)
 
 
+def _kb_block(kb_context: str | None) -> str:
+    """ต่อท้าย system prompt ด้วยความรู้ระบบ/นโยบายจาก RAG."""
+    if not kb_context:
+        return ""
+    return (
+        "\n\nข้อมูลระบบ/นโยบาย IT ภายในบริษัท (ใช้อ้างอิงเมื่อเกี่ยวข้อง ยึดตามนี้ ห้ามเดาเอง — "
+        "ถ้านโยบายระบุว่าเรื่องใดต้องขออนุมัติ/ต้องให้ IT ดำเนินการ ให้เปิดเคสตามนั้น):\n"
+        + kb_context
+    )
+
+
 async def intake_turn(
     history: list[dict],
     images: list[bytes] | None = None,
     known_info: dict | None = None,
+    allow_ignore: bool = False,
+    kb_context: str | None = None,
 ) -> dict:
     """เดินบทสนทนา intake หนึ่ง turn — history = [{role, content}, ...] (รวมข้อความล่าสุดของผู้ใช้).
 
     known_info: ข้อมูลผู้ใช้ที่มีใน DB (full_name/building/floor) → ป้อนให้ AI ไม่ถามซ้ำ.
-    คืน dict: reply, action(ask|resolved|open), needs_confirm, และ field สำหรับเปิด ticket.
+    allow_ignore: เปิดในแชทกลุ่ม → ให้ AI คืน action="ignore" ถ้าข้อความไม่ได้คุยกับบอท.
+    kb_context: ความรู้ระบบ/นโยบาย IT ที่ retrieve มาจาก RAG → ใช้ตอบ/classify ให้ตรงบริษัท.
+    คืน dict: reply, action(ask|resolved|open|ignore), needs_confirm, และ field สำหรับเปิด ticket.
     """
-    system = INTAKE_SYSTEM_PROMPT + _known_info_block(known_info)
+    system = INTAKE_SYSTEM_PROMPT + _known_info_block(known_info) + _kb_block(kb_context)
+    if allow_ignore:
+        system += IGNORE_BLOCK
     try:
         raw = await _ollama_chat_messages(system, history, images)
         result = json.loads(raw)
@@ -248,10 +292,19 @@ async def intake_turn(
         logger.warning("AI intake failed, fallback to open ticket: %s", exc)
         return _intake_fallback()
 
-    if result.get("action") not in VALID_ACTIONS:
+    valid_actions = VALID_ACTIONS | {"ignore"} if allow_ignore else VALID_ACTIONS
+    if result.get("action") not in valid_actions:
         result["action"] = "ask"
+    if result["action"] == "ignore":
+        return {"action": "ignore", "reply": ""}
     result["needs_confirm"] = _as_bool(result.get("needs_confirm"))
     result.setdefault("reply", "รบกวนเล่ารายละเอียดเพิ่มอีกนิดได้ไหมครับ")
+
+    # safety net: ถ้า reply เอ่ยถึงการเปิดเคส/ขอยืนยัน แต่โมเดลลืมตั้ง needs_confirm
+    # → บังคับขึ้นปุ่มยืนยัน ผู้ใช้จะได้ไม่ต้องทวงซ้ำ
+    if result["action"] == "ask" and not result["needs_confirm"]:
+        if _looks_like_confirm_request(result["reply"]):
+            result["needs_confirm"] = True
 
     if result["action"] in ("open", "resolved"):
         if result.get("category") not in VALID_CATEGORIES:

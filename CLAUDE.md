@@ -54,6 +54,7 @@
 | Line Integration | Line Messaging API (OA Webhook + Group Notify) |
 | Backend | FastAPI + Python 3.11 |
 | AI Classify & Response | gemma4:12b via Ollama (http://100.94.37.18:11434) |
+| RAG | pgvector + Ollama embedding (bge-m3) — ความรู้ระบบ/นโยบาย IT |
 | Database | PostgreSQL |
 | ORM | SQLAlchemy 2.0 + Alembic |
 | Auth | JWT (IT Staff login) |
@@ -252,6 +253,21 @@ line_message_id  VARCHAR(100) UNIQUE NOT NULL  -- id จาก sentMessages[].id
 created_at       TIMESTAMP                     -- เก็บ 30 วันแล้วล้าง
 ```
 
+### Table: `kb_chunks` — knowledge base สำหรับ RAG
+```sql
+id          SERIAL PRIMARY KEY
+title       VARCHAR(255)              -- หัวข้อ เช่น "การขอใช้ VPN"
+content     TEXT NOT NULL            -- เนื้อหา (1 หัวข้อ/1 chunk)
+category    VARCHAR(50)              -- map เข้ากับ category ticket ได้
+source      VARCHAR(255)             -- ที่มา ไว้ debug
+embedding   vector(EMBED_DIM)        -- pgvector (bge-m3 = 1024) + HNSW cosine index
+is_active   BOOLEAN DEFAULT true
+created_at  TIMESTAMP
+updated_at  TIMESTAMP
+```
+ต้องใช้ Postgres image ที่มี extension vector (`pgvector/pgvector:pg15`) —
+migration `0005_kb_chunks` รัน `CREATE EXTENSION vector` + สร้าง HNSW index ให้
+
 ### Table: `conversations` — multi-turn intake state (1-1 + กลุ่ม)
 ```sql
 id              SERIAL PRIMARY KEY
@@ -333,6 +349,15 @@ TK-YYYYMMDD-XXXX
 conversation active ภายใน `CONVERSATION_MINUTES` (15 นาที) ต่ออายุทุก turn —
 ระหว่างนี้ข้อความ/รูปถัดมาของผู้ใช้คนเดิมถือว่าอยู่ในบทสนทนานี้ (ไม่ต้อง @ ซ้ำ)
 
+**RAG ระหว่าง intake:** ก่อนเรียก `intake_turn` จะ `rag_service.retrieve_context` ค้น
+`kb_chunks` จากข้อความผู้ใช้ แล้วป้อน `kb_context` ให้ AI (ช่วยทั้งตอบและ classify เช่น
+รู้ว่า VPN/WiFi ต้องขออนุมัติ) — embed/retrieve ล่ม → context ว่าง intake เดินต่อปกติ
+
+**กันบอทเข้าใจผิดในกลุ่ม:** เมื่อ conv active ในกลุ่ม ถ้าข้อความถัดมา "ไม่ได้คุยกับบอท"
+(คุยกับคนอื่น/เปลี่ยนเรื่อง) บอทจะเงียบ — ตัดสินด้วย `intake_turn(allow_ignore=True)` →
+`action="ignore"` (ไม่ตอบ/ไม่บันทึก/ไม่ต่ออายุ); ข้อความที่ `@mention` คนอื่นตัดทิ้งก่อน
+ไม่เรียก AI. ถ้าถูกเรียกตรงๆ (`@mention`/quote-reply/keyword) ถือว่าคุยกับบอทเสมอ
+
 **ในกลุ่ม** บอทจะ "เริ่ม" บทสนทนาเมื่อถูกเรียกผ่าน 3 ทาง:
 1. `@mention` บอท
 2. **quote-reply** ข้อความบอท (เช็ก `quotedMessageId` เทียบ `bot_messages`)
@@ -385,6 +410,14 @@ GET /api/reports/top-issues   # หมวดที่เกิดบ่อย
 GET /api/reports/resolution-time  # avg resolution time
 ```
 
+### Knowledge Base (RAG — Admin only)
+```
+GET    /api/kb            # list KB chunks
+POST   /api/kb            # เพิ่ม chunk (auto-embed)
+PATCH  /api/kb/{id}       # แก้ (re-embed ถ้าแก้ content/title) หรือ toggle is_active
+DELETE /api/kb/{id}       # ลบ chunk
+```
+
 ---
 
 ## Environment Variables (.env)
@@ -407,6 +440,12 @@ LINE_GROUP_IT_ID=              # Group ID สำหรับ notify IT staff
 # Ollama (A5000 Server — ใช้ LAN IP ตรง latency ต่ำกว่า Tailscale)
 OLLAMA_BASE_URL=http://100.94.37.18:11434
 OLLAMA_MODEL=gemma4:12b
+
+# RAG embedding (ต้อง `ollama pull bge-m3` ที่ A5000 ก่อน)
+OLLAMA_EMBED_MODEL=bge-m3
+EMBED_DIM=1024              # bge-m3=1024, nomic-embed-text=768
+RAG_TOP_K=4
+RAG_MIN_SIMILARITY=0.4     # cosine similarity ต่ำกว่านี้ตัดทิ้ง
 
 # MinIO
 MINIO_ENDPOINT=minio:9000

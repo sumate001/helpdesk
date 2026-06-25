@@ -4,7 +4,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api import auth, reports, tickets, users, webhook
+from app.api import auth, kb, reports, tickets, users, webhook
 from app.core.config import settings
 from app.core.database import SessionLocal
 from app.core.scheduler import shutdown_scheduler, start_scheduler
@@ -46,6 +46,7 @@ app.include_router(webhook.router)
 app.include_router(tickets.router)
 app.include_router(users.router)
 app.include_router(reports.router)
+app.include_router(kb.router)
 
 
 @app.get("/health")

@@ -23,6 +23,11 @@ class Settings(BaseSettings):
     # Ollama
     OLLAMA_BASE_URL: str = "http://100.94.37.18:11434"
     OLLAMA_MODEL: str = "gemma4:12b"
+    # RAG embedding (multilingual — รองรับไทย) รันที่ Ollama เครื่องเดียวกับ gemma
+    OLLAMA_EMBED_MODEL: str = "bge-m3"
+    EMBED_DIM: int = 1024            # bge-m3 = 1024, nomic-embed-text = 768
+    RAG_TOP_K: int = 4              # ดึง chunk ที่ใกล้สุดกี่อัน
+    RAG_MIN_SIMILARITY: float = 0.4  # cosine similarity ต่ำกว่านี้ถือว่าไม่เกี่ยว ตัดทิ้ง
 
     # MinIO
     MINIO_ENDPOINT: str = "minio:9000"

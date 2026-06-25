@@ -8,10 +8,12 @@ from app.models.ticket_followup import TicketFollowup
 from app.models.equipment_request import EquipmentRequest
 from app.models.bot_message import BotMessage
 from app.models.conversation import Conversation
+from app.models.kb_chunk import KbChunk
 
 __all__ = [
     "BotMessage",
     "Conversation",
+    "KbChunk",
     "User",
     "LineUser",
     "SLAPolicy",

@@ -13,3 +13,4 @@ python-multipart==0.0.19
 httpx==0.28.1
 apscheduler==3.11.0
 minio==7.2.12
+pgvector==0.3.6

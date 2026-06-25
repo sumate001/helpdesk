@@ -26,7 +26,7 @@ services:
     command: npm run dev -- --host
 
   postgres:
-    image: postgres:15-alpine
+    image: pgvector/pgvector:pg15   # postgres 15 + extension vector สำหรับ RAG
     ports:
       - "5432:5432"
     environment:
