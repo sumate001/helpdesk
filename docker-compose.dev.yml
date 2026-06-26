@@ -3,6 +3,7 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile.dev
+    restart: unless-stopped
     volumes:
       - ./backend:/app
     ports:
@@ -17,6 +18,7 @@ services:
     build:
       context: ./frontend
       dockerfile: Dockerfile.dev
+    restart: unless-stopped
     volumes:
       - ./frontend:/app
       - /app/node_modules
@@ -27,6 +29,7 @@ services:
 
   postgres:
     image: pgvector/pgvector:pg15   # postgres 15 + extension vector สำหรับ RAG
+    restart: unless-stopped
     ports:
       - "5432:5432"
     environment:
@@ -38,6 +41,7 @@ services:
 
   minio:
     image: minio/minio
+    restart: unless-stopped
     ports:
       - "9000:9000"
       - "9001:9001"
@@ -50,10 +54,11 @@ services:
 
   ngrok:
     image: ngrok/ngrok:latest
+    restart: unless-stopped
     ports:
       - "4040:4040"
     env_file: .env.dev
-    command: http backend:8000
+    command: http backend:8000 --url https://untemptable-rosamond-bivoltine.ngrok-free.dev
     depends_on:
       - backend
 
