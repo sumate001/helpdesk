@@ -4,11 +4,11 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api import auth, kb, reports, tickets, users, webhook
+from app.api import auth, forms, kb, liff, reports, settings as settings_api, tickets, users, webhook
 from app.core.config import settings
 from app.core.database import SessionLocal
 from app.core.scheduler import shutdown_scheduler, start_scheduler
-from app.services import sla_service, storage_service
+from app.services import settings_service, sla_service, storage_service
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -20,6 +20,7 @@ async def lifespan(app: FastAPI):
     db = SessionLocal()
     try:
         sla_service.seed_default_policies(db)
+        settings_service.load(db)  # โหลด runtime settings (override .env) เข้า cache
     finally:
         db.close()
     try:
@@ -47,6 +48,9 @@ app.include_router(tickets.router)
 app.include_router(users.router)
 app.include_router(reports.router)
 app.include_router(kb.router)
+app.include_router(settings_api.router)
+app.include_router(liff.router)
+app.include_router(forms.router)
 
 
 @app.get("/health")

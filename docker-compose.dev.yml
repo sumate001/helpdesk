@@ -58,8 +58,11 @@ services:
     ports:
       - "4040:4040"
     env_file: .env.dev
-    command: http backend:8000 --url https://untemptable-rosamond-bivoltine.ngrok-free.dev
+    # ชี้ไป frontend → Vite proxy /api + /webhook ไป backend ให้ domain เดียวเสิร์ฟครบ
+    # (รองรับ LIFF form ที่อยู่ฝั่ง frontend โดยใช้ ngrok domain เดิม)
+    command: http frontend:3000 --url https://untemptable-rosamond-bivoltine.ngrok-free.dev
     depends_on:
+      - frontend
       - backend
 
 volumes:

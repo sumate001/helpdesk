@@ -3,12 +3,16 @@ import asyncio
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import StreamingResponse
+from minio.error import S3Error
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user
 from app.core.database import get_db
 from app.models.equipment_request import EquipmentRequest
+from app.models.line_user import LineUser
 from app.models.ticket import Ticket
+from app.models.ticket_attachment import TicketAttachment
 from app.models.ticket_comment import TicketComment
 from app.models.user import User
 from app.schemas.ticket import (
@@ -21,7 +25,7 @@ from app.schemas.ticket import (
     TicketOut,
     TicketUpdate,
 )
-from app.services import line_service, ticket_service
+from app.services import line_service, storage_service, ticket_service
 
 router = APIRouter(prefix="/api/tickets", tags=["tickets"])
 
@@ -32,19 +36,28 @@ def list_tickets(
     priority: str | None = None,
     category: str | None = None,
     assigned_to: int | None = None,
+    q: str | None = Query(None, description="ค้นหา ticket_no / หัวข้อ / รายละเอียด / ชื่อผู้แจ้ง"),
     db: Session = Depends(get_db),
     _: User = Depends(get_current_user),
 ):
-    q = db.query(Ticket)
+    query = db.query(Ticket)
     if status:
-        q = q.filter(Ticket.status == status)
+        query = query.filter(Ticket.status == status)
     if priority:
-        q = q.filter(Ticket.priority == priority)
+        query = query.filter(Ticket.priority == priority)
     if category:
-        q = q.filter(Ticket.category == category)
+        query = query.filter(Ticket.category == category)
     if assigned_to:
-        q = q.filter(Ticket.assigned_to == assigned_to)
-    return q.order_by(Ticket.id.desc()).limit(500).all()
+        query = query.filter(Ticket.assigned_to == assigned_to)
+    if q:
+        like = f"%{q}%"
+        query = query.outerjoin(Ticket.line_user).filter(
+            (Ticket.ticket_no.ilike(like))
+            | (Ticket.title.ilike(like))
+            | (Ticket.description.ilike(like))
+            | (LineUser.display_name.ilike(like))
+        )
+    return query.order_by(Ticket.id.desc()).limit(500).all()
 
 
 @router.get("/{ticket_id}", response_model=TicketDetail)
@@ -57,6 +70,37 @@ def get_ticket(
     if ticket is None:
         raise HTTPException(status_code=404, detail="ไม่พบ ticket")
     return ticket
+
+
+@router.get("/{ticket_id}/attachments/{attachment_id}/file")
+def get_attachment_file(
+    ticket_id: int,
+    attachment_id: int,
+    db: Session = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
+    attachment = (
+        db.query(TicketAttachment)
+        .filter(
+            TicketAttachment.id == attachment_id,
+            TicketAttachment.ticket_id == ticket_id,
+        )
+        .one_or_none()
+    )
+    if attachment is None or not attachment.file_path:
+        raise HTTPException(status_code=404, detail="ไม่พบไฟล์แนบ")
+
+    bucket, _, object_name = attachment.file_path.partition("/")
+    client = storage_service.get_client()
+    try:
+        response = client.get_object(bucket, object_name)
+    except S3Error as exc:
+        raise HTTPException(status_code=404, detail="ไม่พบไฟล์บน storage") from exc
+
+    return StreamingResponse(
+        response.stream(32 * 1024),
+        media_type=attachment.mime_type or "application/octet-stream",
+    )
 
 
 @router.post("", response_model=TicketOut, status_code=201)

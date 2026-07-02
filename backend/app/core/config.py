@@ -19,6 +19,11 @@ class Settings(BaseSettings):
     LINE_CHANNEL_ACCESS_TOKEN: str = ""
     LINE_CHANNEL_SECRET: str = ""
     LINE_GROUP_IT_ID: str = ""
+    # Channel ID ของ LINE Login channel ที่ผูก LIFF app — ใช้ verify ID token จากฟอร์ม LIFF
+    LINE_CHANNEL_ID: str = ""
+    # LIFF base URL ของ LIFF app (เช่น https://liff.line.me/<liff id>) — บอทแปะปุ่มฟอร์ม
+    # โดยต่อ ?form=<slug> ท้าย URL ให้หน้า LIFF รู้ว่าจะ render ฟอร์มไหน
+    LIFF_BASE_URL: str = ""
 
     # Ollama
     OLLAMA_BASE_URL: str = "http://100.94.37.18:11434"
@@ -28,6 +33,9 @@ class Settings(BaseSettings):
     EMBED_DIM: int = 1024            # bge-m3 = 1024, nomic-embed-text = 768
     RAG_TOP_K: int = 4              # ดึง chunk ที่ใกล้สุดกี่อัน
     RAG_MIN_SIMILARITY: float = 0.4  # cosine similarity ต่ำกว่านี้ถือว่าไม่เกี่ยว ตัดทิ้ง
+    # threshold สำหรับ "ยื่นฟอร์ม" — เข้มกว่า RAG ทั่วไป กันบอทเด้งฟอร์มผิดเรื่อง
+    # (เรื่อง VPN วัดได้ ~0.59-0.73, เรื่อง hardware ~0.39-0.43 → 0.55 อยู่กลางช่องว่าง)
+    FORM_MIN_SIMILARITY: float = 0.55
 
     # MinIO
     MINIO_ENDPOINT: str = "minio:9000"
@@ -40,7 +48,9 @@ class Settings(BaseSettings):
     APP_ENV: str = "production"
     FRONTEND_URL: str = "http://localhost:3000"
 
-    # Follow-up timings (minutes)
+    # Follow-up flow (ผู้ใช้เงียบกลางบทสนทนา → ถามซ้ำ → เปิด ticket อัตโนมัติ)
+    # เปิด/ปิดสดได้จากหน้า Settings (override ใน DB) — ค่านี้เป็นค่าตั้งต้น
+    FOLLOWUP_ENABLED: bool = True
     FOLLOWUP_DELAY_MINUTES: int = 10
     ESCALATE_DELAY_MINUTES: int = 30
 

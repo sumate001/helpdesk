@@ -8,6 +8,7 @@ class KbChunkCreate(BaseModel):
     title: str | None = None
     category: str | None = None
     source: str | None = None
+    form_id: int | None = None
 
 
 class KbChunkUpdate(BaseModel):
@@ -16,6 +17,7 @@ class KbChunkUpdate(BaseModel):
     category: str | None = None
     source: str | None = None
     is_active: bool | None = None
+    form_id: int | None = None
 
 
 class KbChunkOut(BaseModel):
@@ -27,5 +29,6 @@ class KbChunkOut(BaseModel):
     category: str | None
     source: str | None
     is_active: bool
+    form_id: int | None
     created_at: datetime
     updated_at: datetime

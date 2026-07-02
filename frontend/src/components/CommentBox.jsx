@@ -20,14 +20,14 @@ export default function CommentBox({ onSubmit }) {
   return (
     <form onSubmit={handleSubmit} className="space-y-2">
       <textarea
-        className="w-full border border-slate-300 rounded-md p-2 text-sm"
+        className="input-dark w-full rounded-lg p-2 text-sm"
         rows={3}
         placeholder="เพิ่มความคิดเห็น..."
         value={content}
         onChange={(e) => setContent(e.target.value)}
       />
       <div className="flex items-center justify-between">
-        <label className="flex items-center gap-2 text-sm text-slate-600">
+        <label className="flex items-center gap-2 text-sm text-slate-400">
           <input
             type="checkbox"
             checked={isInternal}
@@ -38,7 +38,7 @@ export default function CommentBox({ onSubmit }) {
         <button
           type="submit"
           disabled={sending}
-          className="bg-indigo-600 text-white px-4 py-1.5 rounded-md text-sm disabled:opacity-50"
+          className="btn-primary px-4 py-1.5 rounded-lg text-sm font-medium"
         >
           ส่ง
         </button>

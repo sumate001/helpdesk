@@ -190,7 +190,8 @@ description         TEXT
 category            VARCHAR(50)   -- hardware|software|network|account|service_request|equipment_request|other
 type                VARCHAR(5)    -- L1|L2
 priority            VARCHAR(20)   -- low|medium|high|critical
-status              VARCHAR(30)   -- open|pending_approval|in_progress|resolved|closed
+status              VARCHAR(30)   -- open|pending_approval|in_progress|resolved|closed|ai_answered
+                                  -- ai_answered = AI แนะนำแล้วผู้ใช้บอกว่าหาย (เก็บสถิติ ไม่แจ้ง IT)
 assigned_to         INTEGER REFERENCES users(id)
 ai_response         TEXT          -- ข้อความที่ AI ตอบไปครั้งแรก
 sla_policy_id       INTEGER REFERENCES sla_policies(id)
@@ -278,6 +279,7 @@ status          VARCHAR(10) NOT NULL   -- active | closed
 transcript      TEXT NOT NULL          -- JSON: [{role, content}, ...]
 pending_images  TEXT NOT NULL          -- JSON: รูปที่รอผูก ticket ตอนยังไม่เปิด
 ticket_id       INTEGER REFERENCES tickets(id)
+followup_sent_at TIMESTAMP             -- follow-up: ส่งถามซ้ำไปเมื่อไหร่ (NULL = ยังไม่ส่ง)
 expires_at      TIMESTAMP NOT NULL     -- ต่ออายุทุก turn (CONVERSATION_MINUTES = 15)
 created_at      TIMESTAMP NOT NULL
 updated_at      TIMESTAMP NOT NULL
@@ -300,23 +302,25 @@ updated_at      TIMESTAMP NOT NULL
 - ปัญหา Broadcast equipment
 - ปัญหาที่ซับซ้อน / ส่งผลกระทบหลายคน
 
-### Follow-up Flow (L1)
+### Follow-up Flow (ผู้ใช้เงียบกลางบทสนทนา intake)
+
+เกาะกับตาราง `conversations` — ทำงานเมื่อบอทถาม/แนะนำไว้แล้วผู้ใช้ "เงียบ"
+(conversation ยัง active, ยังไม่มี ticket, ข้อความสุดท้ายเป็นของบอท):
 
 ```
-T+0   : AI ตอบ + ส่ง Quick Reply ["แก้ได้แล้ว ✅", "ยังไม่ได้ ❌"]
-T+10m : ถ้าไม่มี response → AI ส่งข้อความถามซ้ำ
-T+30m : ถ้ายังไม่มี response → Auto เปิด Ticket L2 + แจ้ง IT Group
+T+10m : ส่งข้อความถามซ้ำ + Quick Reply ["แก้ได้แล้ว ✅", "ยังไม่ได้ ❌"]
+        (push เข้ากลุ่มเดิมถ้าเป็นบทสนทนากลุ่ม / หาผู้ใช้ตรงๆ ถ้า 1-1)
+        + ต่ออายุ conversation ให้อยู่ถึงรอบ escalate
+T+30m : ยังเงียบต่อ → เปิด Ticket L2 (description = transcript ทั้งบทสนทนา)
+        + ผูก pending_images + แจ้ง IT Group + ปิด conversation
 ```
 
-User กด "แก้ได้แล้ว ✅":
-- Auto สร้าง Ticket (status = resolved, type = L1)
-- บันทึก AI response + timeline ลง DB
-- ไม่แจ้ง IT Group
-
-User กด "ยังไม่ได้ ❌":
-- Escalate เป็น L2 ทันที
-- เปิด Ticket (status = open)
-- แจ้ง Line Group IT
+- ผู้ใช้ตอบกลับระหว่างนี้ (รวมกดปุ่ม quick reply) → ข้อความเข้าบทสนทนา intake เดิมตามปกติ
+  (`updated_at` ขยับ → ไม่ escalate)
+- **สวิตช์เปิด/ปิดทั้ง flow**: setting `FOLLOWUP_ENABLED` — ค่าตั้งต้นจาก .env,
+  override สดได้จากหน้า Settings (เก็บใน `app_settings` ไม่ต้อง restart)
+- record การ escalate เก็บลง `ticket_followups` ไว้ทำสถิติ
+- `conversations.followup_sent_at` (migration `0008`) ใช้กันส่งถามซ้ำซ้ำสอง
 
 ### Approval Flow (L1 Service/Equipment Request)
 
@@ -418,6 +422,17 @@ PATCH  /api/kb/{id}       # แก้ (re-embed ถ้าแก้ content/title
 DELETE /api/kb/{id}       # ลบ chunk
 ```
 
+### Settings (Runtime AI config — Admin only)
+```
+GET   /api/settings                # ค่า effective ปัจจุบัน (+ EMBED_DIM read-only + list override)
+PATCH /api/settings                # แก้ OLLAMA_MODEL/EMBED_MODEL/BASE_URL/RAG_TOP_K/MIN_SIMILARITY/FOLLOWUP_ENABLED
+                                   #   ส่งค่าว่าง/null = ล้าง override กลับไปใช้ค่า .env
+GET   /api/settings/ollama-models  # รายชื่อ model ที่ pull ไว้บนเครื่อง Ollama (/api/tags)
+```
+override เก็บใน DB (`app_settings`) → โหลดเข้า in-memory cache ตอน start +
+อัปเดต cache ทุกครั้งที่ PATCH. `ai_service`/`rag_service` อ่านค่าผ่าน
+`settings_service.get(key)` ทำให้เปลี่ยน model/RAG params มีผลทันทีไม่ต้อง restart
+
 ---
 
 ## Environment Variables (.env)
@@ -446,6 +461,10 @@ OLLAMA_EMBED_MODEL=bge-m3
 EMBED_DIM=1024              # bge-m3=1024, nomic-embed-text=768
 RAG_TOP_K=4
 RAG_MIN_SIMILARITY=0.4     # cosine similarity ต่ำกว่านี้ตัดทิ้ง
+# ค่าด้านบน (OLLAMA_BASE_URL, OLLAMA_MODEL, OLLAMA_EMBED_MODEL, RAG_TOP_K,
+# RAG_MIN_SIMILARITY) เป็น "ค่าตั้งต้น" — override ได้สดๆ จากหน้า Settings ใน
+# dashboard (เก็บใน DB ตาราง app_settings) ไม่ต้อง restart. EMBED_DIM แก้ผ่าน UI
+# ไม่ได้ เพราะผูกกับ vector column — เปลี่ยนต้องทำ migration + re-embed
 
 # MinIO
 MINIO_ENDPOINT=minio:9000

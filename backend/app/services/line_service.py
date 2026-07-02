@@ -84,6 +84,46 @@ async def reply(
     return await _post("/message/reply", payload)
 
 
+def form_flex(name: str, slug: str, description: str | None = None) -> dict | None:
+    """Flex bubble ปุ่มเปิดฟอร์ม LIFF — None ถ้ายังไม่ตั้ง LIFF_BASE_URL."""
+    if not settings.LIFF_BASE_URL:
+        return None
+    uri = f"{settings.LIFF_BASE_URL}?form={slug}"
+    body = [{"type": "text", "text": name, "weight": "bold", "size": "lg", "wrap": True}]
+    if description:
+        body.append(
+            {"type": "text", "text": description, "wrap": True, "size": "sm", "color": "#666666"}
+        )
+    body.append(
+        {"type": "text", "text": "กดปุ่มด้านล่างเพื่อกรอกแบบฟอร์ม", "wrap": True, "size": "sm", "color": "#666666"}
+    )
+    return {
+        "type": "flex",
+        "altText": f"แบบฟอร์ม: {name}",
+        "contents": {
+            "type": "bubble",
+            "body": {"type": "box", "layout": "vertical", "spacing": "md", "contents": body},
+            "footer": {
+                "type": "box",
+                "layout": "vertical",
+                "contents": [
+                    {
+                        "type": "button",
+                        "style": "primary",
+                        "color": "#4F46E5",
+                        "action": {"type": "uri", "label": "กรอกฟอร์ม", "uri": uri},
+                    }
+                ],
+            },
+        },
+    }
+
+
+async def reply_flex(reply_token: str, flex: dict) -> list[str]:
+    payload = {"replyToken": reply_token, "messages": [flex]}
+    return await _post("/message/reply", payload)
+
+
 async def push(to: str, text: str, with_quick_reply: bool = False) -> list[str]:
     payload = {"to": to, "messages": [_text_message(text, with_quick_reply)]}
     return await _post("/message/push", payload)
@@ -120,6 +160,25 @@ async def get_profile(line_user_id: str) -> dict:
         if resp.status_code >= 400:
             return {}
         return resp.json()
+
+
+async def verify_id_token(id_token: str) -> dict | None:
+    """ตรวจ ID token จาก LIFF กับ LINE — คืน payload ({sub, name, picture}) ถ้าจริง.
+
+    sub = LINE userId ที่เชื่อถือได้ (LINE เซ็นมา ปลอมไม่ได้). คืน None ถ้า token ไม่ผ่าน.
+    """
+    if not settings.LINE_CHANNEL_ID:
+        logger.error("LINE_CHANNEL_ID ไม่ได้ตั้ง — verify ID token ไม่ได้")
+        return None
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.post(
+            "https://api.line.me/oauth2/v2.1/verify",
+            data={"id_token": id_token, "client_id": settings.LINE_CHANNEL_ID},
+        )
+    if resp.status_code >= 400:
+        logger.warning("verify id_token failed %s: %s", resp.status_code, resp.text)
+        return None
+    return resp.json()
 
 
 async def get_message_content(message_id: str) -> bytes:

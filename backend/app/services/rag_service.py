@@ -11,14 +11,15 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.models.kb_chunk import KbChunk
+from app.services import settings_service
 
 logger = logging.getLogger(__name__)
 
 
 async def embed(text: str) -> list[float] | None:
     """ฝัง embedding หนึ่งข้อความ — คืน None ถ้า Ollama ล่ม (ตัวเรียกต้องเผื่อ)."""
-    url = f"{settings.OLLAMA_BASE_URL}/api/embeddings"
-    payload = {"model": settings.OLLAMA_EMBED_MODEL, "prompt": text}
+    url = f"{settings_service.get('OLLAMA_BASE_URL')}/api/embeddings"
+    payload = {"model": settings_service.get("OLLAMA_EMBED_MODEL"), "prompt": text}
     try:
         async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.post(url, json=payload)
@@ -35,7 +36,7 @@ async def embed(text: str) -> list[float] | None:
 
 def retrieve(db: Session, query_embedding: list[float], k: int | None = None) -> list[KbChunk]:
     """คืน chunk ที่ใกล้ที่สุด (cosine) ที่ผ่าน threshold — เรียงจากใกล้สุด."""
-    k = k or settings.RAG_TOP_K
+    k = k or settings_service.get("RAG_TOP_K")
     distance = KbChunk.embedding.cosine_distance(query_embedding).label("distance")
     rows = (
         db.query(KbChunk, distance)
@@ -48,7 +49,7 @@ def retrieve(db: Session, query_embedding: list[float], k: int | None = None) ->
     return [
         chunk
         for chunk, dist in rows
-        if (1 - dist) >= settings.RAG_MIN_SIMILARITY
+        if (1 - dist) >= settings_service.get("RAG_MIN_SIMILARITY")
     ]
 
 
@@ -65,6 +66,37 @@ async def retrieve_context(db: Session, query: str) -> str:
     return "\n---\n".join(
         f"[{c.title or c.category or 'นโยบาย'}] {c.content}" for c in chunks
     )
+
+
+async def find_form(db: Session, query: str):
+    """ค้น KB จากข้อความผู้ใช้ → คืน ServiceForm ที่ผูกกับ chunk ที่ "ใกล้สุดจริงๆ" ถ้ามี.
+
+    ใช้ threshold เข้มกว่าการดึง context ทั่วไป (FORM_MIN_SIMILARITY) และพิจารณาเฉพาะ
+    chunk ที่ใกล้สุด (top-1) เท่านั้น — กันบอทเด้งฟอร์มผิดเรื่อง (เช่น "เครื่องเปิดไม่ติด"
+    ไปแมตช์ฟอร์ม VPN เพราะ chunk มีน้อย). คืน None ถ้าไม่ใกล้พอ/embed ล่ม/ไม่ได้ผูกฟอร์ม.
+    """
+    from app.models.service_form import ServiceForm
+
+    if not query or not query.strip():
+        return None
+    emb = await embed(query)
+    if emb is None:
+        return None
+
+    distance = KbChunk.embedding.cosine_distance(emb).label("distance")
+    row = (
+        db.query(KbChunk, distance)
+        .filter(KbChunk.is_active.is_(True), KbChunk.form_id.isnot(None))
+        .order_by(distance)
+        .first()
+    )
+    if row is None:
+        return None
+    chunk, dist = row
+    if (1 - dist) < settings.FORM_MIN_SIMILARITY:
+        return None
+    form = db.get(ServiceForm, chunk.form_id)
+    return form if form and form.is_active else None
 
 
 async def upsert_chunk(

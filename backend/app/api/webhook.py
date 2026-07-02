@@ -25,7 +25,9 @@ router = APIRouter(prefix="/webhook", tags=["webhook"])
 
 RESOLVED_TEXT = "แก้ได้แล้ว ✅"
 NOT_RESOLVED_TEXT = "ยังไม่ได้ ❌"
+CONFIRM_OPEN_TEXT = "เปิด Ticket ✅"  # ปุ่มยืนยันเปิด ticket (quick reply "confirm")
 APPROVAL_CATEGORIES = ("equipment_request", "service_request")
+IMAGE_PLACEHOLDER = "[ผู้ใช้ส่งรูปภาพ]"
 
 
 @router.post("/line")
@@ -62,6 +64,28 @@ async def _reply(
 async def _notify_group(db: Session, text: str) -> None:
     ids = await line_service.notify_group(text)
     bot_message_service.record(db, ids)
+
+
+async def _maybe_offer_form(db: Session, reply_token: str, text: str) -> bool:
+    """ถ้าข้อความเข้าเรื่องที่มีฟอร์มรองรับ (ผ่าน KB) → ยื่นปุ่ม Flex เปิดฟอร์ม คืน True.
+
+    คืน False ถ้าไม่มีฟอร์มเกี่ยวข้อง/ยังไม่ตั้ง LIFF_BASE_URL → ให้ flow intake เดิมเดินต่อ.
+    """
+    if not text.strip():
+        return False
+    try:
+        form = await rag_service.find_form(db, text)
+    except Exception:  # noqa: BLE001
+        logger.exception("find_form failed")
+        return False
+    if form is None:
+        return False
+    flex = line_service.form_flex(form.name, form.slug, form.description)
+    if flex is None:
+        return False
+    ids = await line_service.reply_flex(reply_token, flex)
+    bot_message_service.record(db, ids)
+    return True
 
 
 async def _handle_event(db: Session, event: dict) -> None:
@@ -256,6 +280,25 @@ def _create_ticket_from_intake(
     return ticket
 
 
+def _confirm_was_requested(history: list[dict]) -> bool:
+    """เทิร์น assistant ล่าสุด (ก่อนข้อความปัจจุบัน) ขึ้นปุ่มยืนยันเปิด ticket ไปหรือยัง."""
+    for m in reversed(history):
+        if m["role"] == "assistant":
+            return bool(m.get("needs_confirm"))
+    return False
+
+
+def _rag_query(candidate_history: list[dict]) -> str:
+    """รวมข้อความผู้ใช้ 3 turn ล่าสุดเป็น query ค้น KB — turn สั้นๆ ("ชั้น 5 ครับ")
+    ลำพังจะค้นไม่เจอ/เจอผิดเรื่อง ต้องมีบริบทของปัญหาจาก turn ก่อนๆ ประกอบ."""
+    msgs = [
+        m["content"]
+        for m in candidate_history
+        if m["role"] == "user" and m["content"].strip() and m["content"] != IMAGE_PLACEHOLDER
+    ]
+    return "\n".join(msgs[-3:])
+
+
 async def _run_intake(
     db: Session,
     conv: Conversation,
@@ -266,16 +309,17 @@ async def _run_intake(
     allow_ignore: bool = False,
 ) -> None:
     """เดินบทสนทนา intake หนึ่ง turn แล้วทำตาม action (ask/resolved/open/ignore)."""
-    msg = user_text.strip() or "[ผู้ใช้ส่งรูปภาพ]"
+    msg = user_text.strip() or IMAGE_PLACEHOLDER
     # ประเมินก่อน "ยังไม่" commit ข้อความเข้า transcript — เผื่อ AI ตัดสินว่า ignore
     candidate_history = conversation_service.get_transcript(conv) + [
         {"role": "user", "content": msg}
     ]
-    # RAG: ดึงความรู้ระบบ/นโยบาย IT ที่เกี่ยวกับข้อความผู้ใช้ (ล่มก็ปล่อยว่าง ไม่พัง intake)
+    # RAG: ดึงความรู้ระบบ/นโยบาย IT ที่เกี่ยวกับบทสนทนา (ล่มก็ปล่อยว่าง ไม่พัง intake)
     kb_context = ""
-    if user_text.strip():
+    query = _rag_query(candidate_history)
+    if query:
         try:
-            kb_context = await rag_service.retrieve_context(db, user_text.strip())
+            kb_context = await rag_service.retrieve_context(db, query)
         except Exception:  # noqa: BLE001
             logger.exception("RAG retrieve failed")
     result = await ai_service.intake_turn(
@@ -287,8 +331,20 @@ async def _run_intake(
         # ข้อความนี้คุยกับคนอื่นในกลุ่ม ไม่ใช่กับบอท → ไม่ตอบ ไม่บันทึก ไม่ต่ออายุ conversation
         return
 
+    # เปิด ticket ได้เฉพาะเมื่อ "ผ่านการยืนยัน" แล้วเท่านั้น: เทิร์นก่อนขึ้นปุ่มยืนยันไว้
+    # หรือผู้ใช้กดปุ่ม/พิมพ์ยืนยันตอบปุ่มนั้น — โมเดลข้ามขั้น (open ทันที) → บังคับกลับไป
+    # ขอยืนยันก่อน (ยกเว้น fallback ตอน AI ล่ม ที่จงใจเปิดเลยกันเรื่องตกหล่น)
+    if result["action"] == "open" and not result.get("fallback"):
+        confirmed = _confirm_was_requested(candidate_history[:-1]) or msg == CONFIRM_OPEN_TEXT
+        if not confirmed:
+            result["action"] = "ask"
+            result["needs_confirm"] = True
+
     conversation_service.append_message(db, conv, "user", msg)
-    conversation_service.append_message(db, conv, "assistant", result["reply"])
+    conversation_service.append_message(
+        db, conv, "assistant", result["reply"],
+        needs_confirm=result["action"] == "ask" and bool(result.get("needs_confirm")),
+    )
 
     action = result["action"]
 
@@ -332,12 +388,14 @@ async def _run_intake(
 # 1-1 chat
 # --------------------------------------------------------------------------
 
-async def _latest_open_ticket(db: Session, line_user_db_id: int) -> Ticket | None:
+async def _latest_ticket(
+    db: Session, line_user_db_id: int, statuses: tuple[str, ...]
+) -> Ticket | None:
     return (
         db.query(Ticket)
         .filter(
             Ticket.line_user_id == line_user_db_id,
-            Ticket.status.notin_(["closed"]),
+            Ticket.status.in_(statuses),
         )
         .order_by(Ticket.id.desc())
         .first()
@@ -358,6 +416,10 @@ async def _handle_user_text(
         await _handle_followup_quickreply(db, lu, text, reply_token)
         return
 
+    # เรื่องที่มีฟอร์มรองรับ (ผ่าน KB) → ยื่นปุ่มฟอร์ม LIFF แทน (เฉพาะตอนยังไม่อยู่ในบทสนทนา)
+    if conv is None and await _maybe_offer_form(db, reply_token, text):
+        return
+
     if conv is None:
         conv = conversation_service.start(db, "user", None, line_user_id)
     await _run_intake(db, conv, lu, reply_token, text, None)
@@ -366,8 +428,12 @@ async def _handle_user_text(
 async def _handle_followup_quickreply(
     db: Session, lu: LineUser, text: str, reply_token: str
 ) -> None:
-    """ปุ่ม 'แก้ได้แล้ว/ยังไม่ได้' จาก follow-up ของ ai_answered ticket เดิม."""
-    ticket = await _latest_open_ticket(db, lu.id)
+    """ปุ่ม 'แก้ได้แล้ว/ยังไม่ได้' ที่กดหลังบทสนทนาปิดไปแล้ว (เช่นจาก follow-up push).
+
+    จำกัดเฉพาะ ticket ที่ยังรอคำตอบผู้ใช้ได้จริง (ai_answered/open/in_progress) —
+    ไม่หยิบ ticket ที่ resolved/pending_approval มา escalate มั่ว.
+    """
+    ticket = await _latest_ticket(db, lu.id, ("ai_answered", "open", "in_progress"))
     if text.strip() == RESOLVED_TEXT:
         if ticket:
             ticket.status = "resolved"
@@ -376,14 +442,17 @@ async def _handle_followup_quickreply(
             db.commit()
         await _reply(db, reply_token, "เยี่ยมเลยครับ 🎉 ขอบคุณที่ใช้บริการนะครับ")
         return
-    # NOT_RESOLVED → escalate
-    if ticket:
+    # NOT_RESOLVED → escalate เฉพาะ ticket ที่ยังไม่ได้เป็น L2 open อยู่แล้ว (กันแจ้งกลุ่มซ้ำ)
+    if ticket and not (ticket.type == "L2" and ticket.status == "open"):
         ticket.type = "L2"
         ticket.status = "open"
         followup_service.mark_responded(db, ticket.id)
         db.commit()
         db.refresh(ticket)
         await _notify_group(db, ticket_service.group_notify_text(ticket))
+    elif ticket:
+        followup_service.mark_responded(db, ticket.id)
+        db.commit()
     await _reply(db, reply_token, "ทีม IT จะรีบเข้ามาช่วยดูแลให้นะครับ 🔧")
 
 
@@ -398,8 +467,9 @@ async def _handle_user_image(
 
     conv = conversation_service.get_active(db, "user", None, line_user_id)
     if conv is None:
-        # ไม่มีบทสนทนา แต่มี ticket เปิดค้าง → แนบรูปเข้า ticket เดิม
-        ticket = await _latest_open_ticket(db, lu.id)
+        # ไม่มีบทสนทนา แต่มี ticket ที่ยังทำงานอยู่ → แนบรูปเข้า ticket เดิม
+        # (ไม่แนบเข้า ticket ที่จบแล้ว — รูปใหม่อาจเป็นปัญหาใหม่ ให้เข้า intake แทน)
+        ticket = await _latest_ticket(db, lu.id, ("open", "in_progress", "pending_approval"))
         if ticket is not None:
             try:
                 content = await line_service.get_message_content(message_id)
@@ -448,6 +518,10 @@ async def _handle_group_text(
 
     # คุยต่อโดยไม่ได้เรียกบอทตรงๆ → ให้ AI ตัดสินว่าข้อความนี้คุยกับบอทหรือกับคนอื่นในกลุ่ม
     allow_ignore = conv is not None and addressed is None
+
+    # เรื่องที่มีฟอร์มรองรับ (ผ่าน KB) → ยื่นปุ่มฟอร์ม LIFF แทน (เฉพาะตอนเพิ่งถูกเรียก)
+    if conv is None and await _maybe_offer_form(db, reply_token, text):
+        return
 
     profile = await line_service.get_profile(line_user_id)
     lu = ticket_service.upsert_line_user(db, line_user_id, profile)

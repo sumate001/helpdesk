@@ -3,6 +3,119 @@
 @tailwind utilities;
 
 body {
-  @apply bg-slate-100 text-slate-800;
+  @apply text-slate-100;
   font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  background: #050814;
+  min-height: 100vh;
+}
+
+#root {
+  position: relative;
+  min-height: 100vh;
+  isolation: isolate;
+}
+
+#root::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  background:
+    radial-gradient(60vmax 60vmax at 10% -10%, rgba(99, 102, 241, 0.35), transparent 60%),
+    radial-gradient(50vmax 50vmax at 110% 10%, rgba(34, 211, 238, 0.25), transparent 60%),
+    radial-gradient(50vmax 50vmax at 50% 120%, rgba(168, 85, 247, 0.25), transparent 60%),
+    #050814;
+  background-attachment: fixed;
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(129, 140, 248, 0.5) transparent;
+}
+
+::selection {
+  background: rgba(129, 140, 248, 0.4);
+}
+
+.glass {
+  background: rgba(255, 255, 255, 0.05);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+}
+
+.glass-strong {
+  background: rgba(255, 255, 255, 0.06);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.text-glow {
+  background: linear-gradient(90deg, #a5b4fc, #67e8f9 60%, #e879f9);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+@keyframes fadein {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-fadein {
+  animation: fadein 0.25s ease-out;
+}
+
+@keyframes pulse-glow {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.5;
+  }
+}
+
+.animate-pulse-glow {
+  animation: pulse-glow 2s ease-in-out infinite;
+}
+
+.input-dark {
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  color: #e2e8f0;
+  color-scheme: dark;
+}
+
+.input-dark::placeholder {
+  color: #64748b;
+}
+
+.input-dark:focus {
+  outline: none;
+  border-color: transparent;
+  box-shadow: 0 0 0 2px rgba(129, 140, 248, 0.7), 0 0 16px rgba(129, 140, 248, 0.3);
+}
+
+.btn-primary {
+  background: linear-gradient(135deg, #6366f1, #d946ef);
+  color: white;
+  box-shadow: 0 0 16px rgba(129, 140, 248, 0.35);
+  transition: all 0.2s ease;
+}
+
+.btn-primary:hover:not(:disabled) {
+  box-shadow: 0 0 24px rgba(129, 140, 248, 0.55);
+  transform: translateY(-1px);
+}
+
+.btn-primary:disabled {
+  opacity: 0.5;
 }

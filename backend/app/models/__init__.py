@@ -9,11 +9,15 @@ from app.models.equipment_request import EquipmentRequest
 from app.models.bot_message import BotMessage
 from app.models.conversation import Conversation
 from app.models.kb_chunk import KbChunk
+from app.models.app_setting import AppSetting
+from app.models.service_form import ServiceForm
 
 __all__ = [
+    "AppSetting",
     "BotMessage",
     "Conversation",
     "KbChunk",
+    "ServiceForm",
     "User",
     "LineUser",
     "SLAPolicy",

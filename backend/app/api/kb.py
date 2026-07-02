@@ -27,7 +27,7 @@ async def create_chunk(
     _: User = Depends(require_admin),
 ):
     try:
-        return await rag_service.upsert_chunk(
+        chunk = await rag_service.upsert_chunk(
             db,
             content=payload.content,
             title=payload.title,
@@ -36,6 +36,11 @@ async def create_chunk(
         )
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail=str(exc))
+    if payload.form_id is not None:
+        chunk.form_id = payload.form_id
+        db.commit()
+        db.refresh(chunk)
+    return chunk
 
 
 @router.patch("/{chunk_id}", response_model=KbChunkOut)

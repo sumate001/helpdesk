@@ -21,4 +21,18 @@ api.interceptors.response.use(
   }
 );
 
+// ดึงข้อความ error จาก response ให้ปลอดภัย — FastAPI validation error (422) ส่ง
+// detail เป็น array ของ object ไม่ใช่ string ถ้า render ตรงๆ ใน JSX จะ crash (blank screen)
+export function apiError(err, fallback) {
+  const detail = err.response?.data?.detail;
+  if (!detail) return fallback;
+  if (typeof detail === "string") return detail;
+  if (Array.isArray(detail)) {
+    return detail
+      .map((d) => (typeof d === "string" ? d : d.msg || JSON.stringify(d)))
+      .join("; ");
+  }
+  return JSON.stringify(detail);
+}
+
 export default api;

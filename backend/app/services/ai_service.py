@@ -1,16 +1,37 @@
-"""Ollama gemma4:12b integration — classify L1/L2 และสร้าง first response ภาษาไทย.
+"""Ollama gemma4:12b integration — multi-turn intake: ช่วยแก้/เก็บข้อมูล/ตัดสินเปิด ticket.
 
 gemma4:12b เป็น multimodal — รับรูปได้ ใช้ดู error screenshot ที่ผู้ใช้ส่งมาในกลุ่ม.
 """
 import base64
 import json
 import logging
+import re
 
 import httpx
 
-from app.core.config import settings
+from app.services import settings_service
 
 logger = logging.getLogger(__name__)
+
+
+def _parse_json(raw: str) -> dict:
+    """parse JSON จาก content ของ Ollama แบบทนทาน.
+
+    บางโมเดล (เช่น ornith) ห่อ JSON ด้วย markdown fence ```json ... ``` หรือมีข้อความ
+    นำ/ตาม แม้สั่ง format=json — json.loads ตรงๆ จะพัง ("char 0") ทำให้ตกไป fallback
+    (= เปิดเคสเสมอ). ฟังก์ชันนี้ลอก fence + ดึงบล็อก {...} ออกมาก่อน parse.
+    """
+    s = (raw or "").strip()
+    if s.startswith("```"):
+        s = re.sub(r"^```[a-zA-Z]*\s*", "", s)
+        s = re.sub(r"\s*```$", "", s).strip()
+    try:
+        return json.loads(s)
+    except json.JSONDecodeError:
+        start, end = s.find("{"), s.rfind("}")
+        if start != -1 and end > start:
+            return json.loads(s[start : end + 1])  # อาจ raise ต่อ → ตัวเรียกจับเอง
+        raise
 
 VALID_CATEGORIES = {
     "hardware",
@@ -23,135 +44,59 @@ VALID_CATEGORIES = {
 }
 VALID_PRIORITIES = {"low", "medium", "high", "critical"}
 
-CLASSIFY_SYSTEM_PROMPT = """คุณเป็นผู้ช่วย IT Support สำหรับองค์กร หน้าที่ของคุณคือ "พยายามช่วยแก้ปัญหาให้ผู้ใช้ก่อน" ด้วยการให้คำแนะนำ/วิธีทำที่ชัดเจน แล้วค่อยตัดสินว่าต้องเปิด e-ticket ส่งทีม IT หรือไม่
-
-หลักการตัดสิน needs_ticket:
-- needs_ticket = false → ปัญหานี้ "แก้ได้ด้วยคำแนะนำ" ตอบจบในข้อความได้ เช่น สอบถามวิธีใช้งาน/ขั้นตอน, IT policy, ปัญหาเล็กที่ผู้ใช้ทำเองได้ (restart, เคลียร์ cache, ตั้งค่าเบื้องต้น) → ใส่วิธีแก้จริงๆ ลงใน reply
-- needs_ticket = true → "แก้ด้วยคำแนะนำไม่ได้" ต้องมีคน IT ลงมือทำ เช่น อุปกรณ์เสีย/ต้องซ่อม, network/ระบบล่ม, ขอเปิด/รีเซ็ต account หรือสิทธิ์ที่ IT ต้องทำให้, ขอเบิกอุปกรณ์, ปัญหาซับซ้อนกระทบหลายคน → reply ให้ตอบรับว่ารับเรื่องและจะส่งทีม IT
-
-category ต้องเป็นหนึ่งใน: hardware, software, network, account, service_request, equipment_request, other
-priority ต้องเป็นหนึ่งใน: low, medium, high, critical
-equipment_request และ service_request ให้ถือว่า needs_ticket = true เสมอ (ต้องอนุมัติ)
-
-ถ้า category เป็น equipment_request ให้สกัดชื่ออุปกรณ์หลักที่ขอลง item_name (สั้นๆ เช่น "เมาส์") และจำนวนลง quantity (จำนวนเต็ม ถ้าไม่ระบุให้ใช้ 1) หากขอหลายชนิดให้เลือกชนิดหลักชนิดเดียว
-
-ตอบกลับเป็น JSON เท่านั้น รูปแบบ:
-{"needs_ticket":true,"category":"...","priority":"...","title":"หัวข้อสั้นๆ","reply":"ข้อความตอบผู้ใช้ภาษาไทย กระชับ สุภาพ — ถ้า needs_ticket=false ให้ใส่วิธีแก้จริง","item_name":"ชื่ออุปกรณ์ (เฉพาะ equipment_request)","quantity":1}"""
+def _strip_images(messages: list[dict]) -> bool:
+    """ลบ field images ออกจากทุก message — คืน True ถ้ามีรูปให้ลบจริง."""
+    had = False
+    for m in messages:
+        if m.pop("images", None) is not None:
+            had = True
+    return had
 
 
-async def _ollama_chat(
-    system: str, user: str, images: list[bytes] | None = None
-) -> str:
-    url = f"{settings.OLLAMA_BASE_URL}/api/chat"
-    user_msg: dict = {"role": "user", "content": user}
-    if images:
-        # Ollama รับรูปเป็น base64 ใน field images ของ message
-        user_msg["images"] = [base64.b64encode(b).decode() for b in images]
+async def _post_chat(messages: list[dict]) -> str:
+    """ยิง /api/chat. ถ้าโมเดลไม่รองรับรูป (multimodal) → ลบรูปแล้วลองใหม่ด้วย text
+    ล้วน แทนที่จะ error (ไม่งั้น intake จะตกไป fallback = เปิดเคสทุกครั้ง).
+    """
+    url = f"{settings_service.get('OLLAMA_BASE_URL')}/api/chat"
     payload = {
-        "model": settings.OLLAMA_MODEL,
-        "messages": [
-            {"role": "system", "content": system},
-            user_msg,
-        ],
+        "model": settings_service.get("OLLAMA_MODEL"),
+        "messages": messages,
         "stream": False,
         "format": "json",
-        "think": False,  # gemma4 เป็น thinking model — ปิด think งานเรา (classify+ตอบสั้น) ไม่ต้อง reason เร็วขึ้นมาก
+        "think": False,  # บางโมเดลเป็น thinking model — ปิด think งานเรา (classify+ตอบสั้น) เร็วขึ้นมาก
         "keep_alive": "30m",  # คาโมเดลไว้ใน VRAM กัน cold-load ตอน user ทักจริง
         "options": {"temperature": 0.3},
     }
     async with httpx.AsyncClient(timeout=120) as client:
         resp = await client.post(url, json=payload)
+        # โมเดลที่ไม่ multimodal จะตอบ 400 ว่า "does not support multimodal" → ลองใหม่ไม่มีรูป
+        if resp.status_code == 400 and "multimodal" in resp.text.lower():
+            if _strip_images(messages):
+                logger.warning(
+                    "model '%s' ไม่รองรับรูป — ลองใหม่แบบ text ล้วน",
+                    payload["model"],
+                )
+                resp = await client.post(url, json=payload)
         resp.raise_for_status()
-        data = resp.json()
-        return data["message"]["content"]
+        return resp.json()["message"]["content"]
 
 
 async def _ollama_chat_messages(
     system: str, history: list[dict], images: list[bytes] | None = None
 ) -> str:
     """chat แบบ multi-turn — history = [{role, content}, ...]; images แนบที่ turn ล่าสุด."""
-    url = f"{settings.OLLAMA_BASE_URL}/api/chat"
     messages: list[dict] = [{"role": "system", "content": system}]
     for m in history:
         messages.append({"role": m["role"], "content": m["content"]})
     if images and messages[-1]["role"] == "user":
         messages[-1]["images"] = [base64.b64encode(b).decode() for b in images]
-    payload = {
-        "model": settings.OLLAMA_MODEL,
-        "messages": messages,
-        "stream": False,
-        "format": "json",
-        "think": False,
-        "keep_alive": "30m",
-        "options": {"temperature": 0.3},
-    }
-    async with httpx.AsyncClient(timeout=120) as client:
-        resp = await client.post(url, json=payload)
-        resp.raise_for_status()
-        return resp.json()["message"]["content"]
-
-
-def _fallback() -> dict:
-    # ถ้า AI ใช้ไม่ได้ → เปิด ticket ไว้ก่อนเพื่อไม่ให้เรื่องตกหล่น (ปลอดภัยกว่า)
-    return {
-        "needs_ticket": True,
-        "category": "other",
-        "priority": "medium",
-        "title": "ปัญหาที่แจ้งผ่าน Line",
-        "reply": "ขอบคุณที่แจ้งมานะครับ ทีม IT จะรีบดำเนินการให้ครับ 🔧",
-    }
-
-
-# category ที่ต้องเปิด ticket เสมอ (ต้องมีคน IT ดำเนินการ/อนุมัติ)
-ALWAYS_TICKET_CATEGORIES = {"equipment_request", "service_request"}
+    return await _post_chat(messages)
 
 
 def _as_bool(value) -> bool:
     if isinstance(value, bool):
         return value
     return str(value).strip().lower() in {"true", "1", "yes"}
-
-
-IMAGE_ONLY_PROMPT = (
-    "ผู้ใช้ส่งรูปภาพปัญหา IT มาให้ (มักเป็น error screenshot หรือรูปอุปกรณ์เสีย) "
-    "โดยไม่มีข้อความประกอบ กรุณาดูรูปแล้ววิเคราะห์ว่าเป็นปัญหาอะไร "
-    "ใน reply ให้สรุปสิ่งที่เห็นในรูปและปัญหาที่น่าจะเป็น"
-)
-
-
-async def classify_and_respond(
-    message: str, images: list[bytes] | None = None
-) -> dict:
-    """คืน dict: needs_ticket, category, priority, title, reply (+ item_name/quantity).
-
-    images: ถ้ามี → ส่งให้ gemma อ่านรูป (เช่น error screenshot จากกลุ่ม).
-    """
-    user_text = message.strip() if message and message.strip() else IMAGE_ONLY_PROMPT
-    try:
-        raw = await _ollama_chat(CLASSIFY_SYSTEM_PROMPT, user_text, images)
-        result = json.loads(raw)
-    except (httpx.HTTPError, json.JSONDecodeError, KeyError) as exc:
-        logger.warning("AI classify failed, fallback to ticket: %s", exc)
-        return _fallback()
-
-    # sanitize
-    if result.get("category") not in VALID_CATEGORIES:
-        result["category"] = "other"
-    if result.get("priority") not in VALID_PRIORITIES:
-        result["priority"] = "medium"
-    result.setdefault("reply", "ขอบคุณที่แจ้งมานะครับ ทีม IT จะดำเนินการให้ครับ")
-    result["title"] = (result.get("title") or message[:80] or "ปัญหาจากรูปภาพที่แจ้ง")[:255]
-
-    result["needs_ticket"] = _as_bool(result.get("needs_ticket"))
-    # บาง category ต้องเปิด ticket เสมอ ไม่ว่า AI จะตอบยังไง
-    if result["category"] in ALWAYS_TICKET_CATEGORIES:
-        result["needs_ticket"] = True
-
-    if result["category"] == "equipment_request":
-        result["item_name"] = (result.get("item_name") or result["title"])[:255]
-        result["quantity"] = _parse_quantity(result.get("quantity"))
-
-    return result
 
 
 def _parse_quantity(value) -> int:
@@ -174,15 +119,29 @@ B) ต้องให้ทีม IT ลงมือ (L2) หรือเป็�
 
 *** กฎสำคัญ: ทันทีที่ตัดสินว่าเข้ากลุ่ม B (ต้องเปิดเคส) ให้เลิกพยายามแก้ แล้วเก็บข้อมูลเพื่อเปิดเคสเลย ***
 
-เมื่อจะเปิดเคส ให้ขอข้อมูลที่จำเป็น "รวมในข้อความเดียว" เฉพาะที่ยัง "ไม่ทราบ":
-  - ชื่อ-นามสกุลผู้แจ้ง (full_name)
-  - อาคาร (building) และชั้น (floor)
-  - ถ้ารายละเอียดปัญหายังไม่พอเข้าใจ ให้ถามเพิ่มสั้นๆ ในข้อความเดียวกัน
-ห้ามถามทีละข้อหลายรอบ — ถามครั้งเดียวให้ครบ
+เมื่อจะเปิดเคส ให้ขอข้อมูลที่จำเป็น "รวมในข้อความเดียว" เฉพาะที่ยัง "ไม่ทราบ" — ทั้งข้อมูลผู้แจ้ง และข้อมูลที่ช่าง IT ต้องใช้ทำงานต่อ:
+
+[ข้อมูลผู้แจ้ง — ทุกเคส]
+  - ชื่อ-นามสกุล (full_name), อาคาร (building), ชั้น (floor)
+
+[ข้อมูลที่ช่างต้องใช้ — เลือกถามเฉพาะที่ "เกี่ยวกับปัญหานี้" และ "ยังไม่รู้จากที่ผู้ใช้เล่ามา" อย่าถามครบทุกข้อพร่ำเพรื่อ]
+ปัญหาฮาร์ดแวร์/อุปกรณ์/เน็ตเวิร์ก/ซอฟต์แวร์ (กลุ่ม B ที่ต้องซ่อม/แก้):
+  - อุปกรณ์/ระบบที่มีปัญหาคืออะไร + รุ่น/หมายเลขเครื่อง/asset tag ถ้าผู้ใช้พอบอกได้
+  - อาการที่เกิดจริงเป็นยังไง + มีข้อความ error อะไรขึ้นไหม (ให้พิมพ์มาตามที่เห็น)
+  - เริ่มมีปัญหาตั้งแต่เมื่อไหร่ / เป็นตลอดหรือเป็นๆหายๆ
+  - กระทบเฉพาะคุณ หรือคนอื่นด้วย (ทั้งแผนก/ทั้งตึก) — ใช้ประเมินความเร่งด่วน
+  - เคยลองแก้อะไรไปแล้วบ้าง (ถ้ามี)
+ขอเบิกอุปกรณ์/ขอใช้บริการ/ขอสิทธิ์ (equipment_request/service_request):
+  - ต้องการอะไร / จำนวน / เหตุผล-ความจำเป็น (ไม่ต้องถามอาการหรือ troubleshoot)
+
+ห้ามถามทีละข้อหลายรอบ — เลือกเฉพาะที่ขาดและเกี่ยวข้อง รวมถามครั้งเดียวให้ครบในข้อความเดียว กระชับ เป็นข้อๆ ได้
+
+*** ลำดับสำคัญ: เทิร์นที่คุณ "ขอข้อมูลผู้แจ้ง (ชื่อ/อาคาร/ชั้น)" ต้องตั้ง needs_confirm=false เสมอ — ห้ามขอข้อมูลแล้วขึ้นปุ่มยืนยันในเทิร์นเดียวกัน ต้องรอผู้ใช้ตอบข้อมูลก่อน เทิร์นถัดไปที่ข้อมูลครบแล้วค่อยสรุป+ยืนยัน ***
 
 เมื่อได้ข้อมูลครบ → สรุปสั้นๆ แล้วถามยืนยันเปิด Ticket (action="ask", needs_confirm=true)
 *** กฎสำคัญ: ทุกครั้งที่ reply ของคุณ "เอ่ยถึงการเปิดเคส/ถามว่าจะเปิด Ticket ให้ไหม/สรุปเรื่องเพื่อเตรียมเปิด" ต้องตั้ง needs_confirm=true ในข้อความเดียวกันนั้นเสมอ — ห้ามสรุปแล้วถามยืนยันโดยปล่อย needs_confirm=false (ปุ่มยืนยันจะไม่ขึ้น ผู้ใช้ต้องทวงซ้ำ ซึ่งผิด) ***
 ห้ามแยก "สรุป" กับ "ปุ่มยืนยัน" เป็นคนละ turn — ต้องอยู่ใน turn เดียวกัน
+*** ห้ามถามคำถามอื่นปนอยู่ในเทิร์นเดียวกับที่สรุป+ขอยืนยันเปิด Ticket (needs_confirm=true) — เทิร์นนั้นต้องมีคำถามเดียวคือ "ยืนยันเปิด Ticket ไหม" เท่านั้น ถ้ายังมีอะไรต้องถามเพิ่ม (อาการ/ข้อมูล/วินิจฉัย) ให้ถามให้จบก่อน แล้วค่อยสรุป+ยืนยันในเทิร์นถัดไป ***
 ผู้ใช้ยืนยัน (เช่น "เปิดเลย","ใช่",กดปุ่ม) → action="open"
 ผู้ใช้บอกว่าหายเองแล้ว → action="resolved"
 
@@ -196,8 +155,9 @@ category: hardware, software, network, account, service_request, equipment_reque
 priority: low, medium, high, critical | type: L1 หรือ L2
 
 ตอบกลับเป็น JSON เท่านั้น:
-{"reply":"ข้อความถึงผู้ใช้ (ภาษาไทย กระชับ)","action":"ask|resolved|open","needs_confirm":false,"category":"...","priority":"...","type":"L2","title":"หัวข้อสั้นๆ","description":"สรุปปัญหา+ข้อมูลผู้แจ้ง สำหรับทีม IT","full_name":null,"building":null,"floor":null,"item_name":null,"quantity":1}
+{"reply":"ข้อความถึงผู้ใช้ (ภาษาไทย กระชับ)","action":"ask|resolved|open","needs_confirm":false,"category":"...","priority":"...","type":"L2","title":"หัวข้อสั้นๆ","description":"สรุปให้ช่างทำงานต่อได้ทันที","full_name":null,"building":null,"floor":null,"item_name":null,"quantity":1}
 - ใส่ category/priority/type/title/description ให้ครบเมื่อ action=open หรือ resolved
+- description ต้องเขียนให้ช่าง IT หยิบไปทำต่อได้เลย รวบรวมจากบทสนทนาทั้งหมด: อาการ/ปัญหา, อุปกรณ์-รุ่น-asset tag, ข้อความ error, เวลาที่เริ่ม, ขอบเขตผลกระทบ, สิ่งที่ลองแก้แล้ว + ชื่อผู้แจ้ง/อาคาร/ชั้น (อย่าใส่แค่ประโยคเดียวลอยๆ)
 - full_name/building/floor ใส่เมื่อทราบ (จากผู้ใช้หรือจากข้อมูลที่ทราบแล้ว) ไม่งั้น null"""
 
 VALID_ACTIONS = {"ask", "resolved", "open"}
@@ -220,6 +180,41 @@ def _looks_like_confirm_request(reply: str) -> bool:
     low = (reply or "").lower()
     return any(hint in low for hint in _CONFIRM_HINTS)
 
+
+# คำบ่งคำถาม (ใช้ตอนไม่มี "?" เลย) — นับได้สูงสุด 1 คำถามต่อบรรทัด กันนับซ้ำ
+# เพราะประโยคเดียวมักมีหลาย marker ปนกัน (เช่น "...ไหมครับ?" มีทั้ง "ไหม" และ "?")
+_QUESTION_WORD_MARKERS = ("ไหม", "มั้ย", "รึยัง", "หรือยัง", "หรือไม่", "รึเปล่า", "หรือเปล่า")
+
+
+def _count_questions(reply: str) -> int:
+    """นับจำนวนประโยคคำถามแบบหยาบๆ — ใช้ "?" เป็นหลักเพราะแม่นสุด (นับตามจำนวนจริง ไม่ซ้ำ
+    ต่อให้ประโยคนั้นมีทั้ง "ไหม" และ "?" ก็นับเป็น 1 คำถาม). ถ้าไม่มี "?" เลยค่อย fallback ไป
+    นับ marker คำถามแยกตามบรรทัด (อย่างมาก 1 คำถามต่อบรรทัด)."""
+    text = reply or ""
+    if "?" in text:
+        return text.count("?")
+    lines = [l for l in text.split("\n") if l.strip()]
+    if len(lines) <= 1:
+        return 1 if any(m in text for m in _QUESTION_WORD_MARKERS) else 0
+    return sum(1 for l in lines if any(m in l for m in _QUESTION_WORD_MARKERS))
+
+
+def _reply_has_extra_question(reply: str) -> bool:
+    """True ถ้า reply มีคำถามมากกว่า 1 ประโยค — เช่นถามข้อมูล/วินิจฉัยต่อ พร้อมกับสรุปขอยืนยัน
+    ในเทิร์นเดียวกัน. กรณีนี้ต้องรอผู้ใช้ตอบคำถามที่ค้างอยู่ก่อน ยังไม่ควรขึ้นปุ่มยืนยัน."""
+    return _count_questions(reply) > 1
+
+
+def _has_required_identity(result: dict, known_info: dict | None) -> bool:
+    """ข้อมูลผู้แจ้งครบหรือยัง (ชื่อ + อาคาร + ชั้น) — รวมจาก known_info (DB) กับที่ AI
+    สกัดได้ในเทิร์นนี้. ใช้กันไม่ให้ขึ้นปุ่มยืนยันทั้งที่ยังถามข้อมูลผู้แจ้งไม่ครบ.
+    """
+    known = known_info or {}
+    return all(
+        bool(result.get(key) or known.get(key))
+        for key in ("full_name", "building", "floor")
+    )
+
 # ต่อท้าย system prompt เฉพาะแชทกลุ่ม — ให้บอทประเมินว่าข้อความล่าสุด "คุยกับบอท" จริงไหม
 IGNORE_BLOCK = """
 
@@ -232,6 +227,8 @@ def _intake_fallback() -> dict:
     return {
         "reply": "ขอโทษครับ ระบบขัดข้องชั่วคราว ผมเปิดเรื่องส่งทีม IT ให้เลยนะครับ 🔧",
         "action": "open",
+        # AI ล่ม — เปิดโดยไม่ผ่านการยืนยัน (จงใจ กันเรื่องตกหล่น) → ให้ webhook ข้าม confirm guard
+        "fallback": True,
         "needs_confirm": False,
         "category": "other",
         "priority": "medium",
@@ -287,8 +284,13 @@ async def intake_turn(
         system += IGNORE_BLOCK
     try:
         raw = await _ollama_chat_messages(system, history, images)
-        result = json.loads(raw)
+        result = _parse_json(raw)
     except (httpx.HTTPError, json.JSONDecodeError, KeyError) as exc:
+        if allow_ignore:
+            # ข้อความในกลุ่มที่ไม่ได้เรียกบอทตรงๆ — AI ล่มก็เงียบไว้ ดีกว่าเปิด ticket
+            # จากข้อความที่อาจไม่ได้คุยกับบอทเลย (กัน ticket spam ตอน Ollama ล่ม)
+            logger.warning("AI intake failed on unaddressed group message, ignoring: %s", exc)
+            return {"action": "ignore", "reply": ""}
         logger.warning("AI intake failed, fallback to open ticket: %s", exc)
         return _intake_fallback()
 
@@ -300,11 +302,21 @@ async def intake_turn(
     result["needs_confirm"] = _as_bool(result.get("needs_confirm"))
     result.setdefault("reply", "รบกวนเล่ารายละเอียดเพิ่มอีกนิดได้ไหมครับ")
 
-    # safety net: ถ้า reply เอ่ยถึงการเปิดเคส/ขอยืนยัน แต่โมเดลลืมตั้ง needs_confirm
-    # → บังคับขึ้นปุ่มยืนยัน ผู้ใช้จะได้ไม่ต้องทวงซ้ำ
-    if result["action"] == "ask" and not result["needs_confirm"]:
-        if _looks_like_confirm_request(result["reply"]):
-            result["needs_confirm"] = True
+    if result["action"] == "ask":
+        if not _has_required_identity(result, known_info):
+            # ยังเก็บข้อมูลผู้แจ้งไม่ครบ (ชื่อ/อาคาร/ชั้น) → ยังไม่ถึงขั้นยืนยัน
+            # ห้ามขึ้นปุ่ม แม้โมเดลจะตั้ง needs_confirm มา (กันบอทถามแล้วเด้งปุ่มเลย)
+            result["needs_confirm"] = False
+        else:
+            if not result["needs_confirm"] and _looks_like_confirm_request(result["reply"]):
+                # ข้อมูลครบแล้ว + reply เป็นการสรุป/ขอยืนยัน แต่โมเดลลืมตั้ง → บังคับขึ้นปุ่ม
+                result["needs_confirm"] = True
+            if result["needs_confirm"] and _reply_has_extra_question(result["reply"]):
+                # reply มีคำถามอื่นแฝงอยู่นอกเหนือจากคำถามยืนยัน (เช่นยังถามอาการ/ข้อมูลเพิ่มอยู่ หรือ
+                # แค่เอ่ยถึงการเปิดเคสแบบมีเงื่อนไข "ถ้ายังไม่หายจะเปิดเคส") — ต้องรอผู้ใช้ตอบคำถาม
+                # ที่ค้างก่อน ยังไม่ควรขึ้นปุ่มยืนยันในเทิร์นนี้ ไม่ว่า needs_confirm จะมาจากโมเดล
+                # หรือถูกบังคับตั้งจากด้านบนก็ตาม
+                result["needs_confirm"] = False
 
     if result["action"] in ("open", "resolved"):
         if result.get("category") not in VALID_CATEGORIES:

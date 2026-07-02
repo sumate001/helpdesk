@@ -10,13 +10,19 @@ from app.services import sla_service
 
 
 def generate_ticket_no(db: Session) -> str:
-    """TK-YYYYMMDD-XXXX โดย XXXX คือ running ของวันนั้น."""
+    """TK-YYYYMMDD-XXXX โดย XXXX คือ running ของวันนั้น.
+
+    ใช้ค่า max ของเลข running ที่มีอยู่ (ไม่ใช่ count แถว) — count จะออกเลขซ้ำ
+    ทันทีที่มี ticket ถูกลบระหว่างวัน. เลข zero-pad ความกว้างคงที่ ทำให้ max
+    เชิง string เท่ากับ max เชิงตัวเลข.
+    """
     today = datetime.now(timezone.utc).strftime("%Y%m%d")
     prefix = f"TK-{today}-"
-    count = db.query(func.count(Ticket.id)).filter(
+    last = db.query(func.max(Ticket.ticket_no)).filter(
         Ticket.ticket_no.like(f"{prefix}%")
     ).scalar()
-    return f"{prefix}{count + 1:04d}"
+    running = int(last.rsplit("-", 1)[1]) + 1 if last else 1
+    return f"{prefix}{running:04d}"
 
 
 def upsert_line_user(db: Session, line_user_id: str, profile: dict | None = None) -> LineUser:
@@ -75,6 +81,12 @@ def create_ticket(
     return ticket
 
 
+def _brief(text: str, limit: int = 500) -> str:
+    """ตัดรายละเอียดให้พอดีกับ notify — ตัดเฉพาะเมื่อยาวเกินจริง + ใส่ … บอกว่ามีต่อ."""
+    text = text or ""
+    return text if len(text) <= limit else text[:limit].rstrip() + "…"
+
+
 def group_notify_text(ticket: Ticket) -> str:
     lu = ticket.line_user
     who = lu.display_name if lu else "-"
@@ -87,5 +99,5 @@ def group_notify_text(ticket: Ticket) -> str:
         f"👤 ผู้แจ้ง: {who} ({dept}){loc}\n"
         f"📂 หมวด: {ticket.category}\n"
         f"🔴 Priority: {ticket.priority}\n"
-        f"📝 {(ticket.description or ticket.title)[:120]}"
+        f"📝 {_brief(ticket.description or ticket.title)}"
     )
