@@ -20,7 +20,7 @@ services:
       - "80"
 
   postgres:
-    image: postgres:15-alpine
+    image: pgvector/pgvector:pg15   # postgres 15 + extension vector สำหรับ RAG
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER}

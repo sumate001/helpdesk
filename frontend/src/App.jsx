@@ -5,6 +5,9 @@ import Dashboard from "./pages/Dashboard";
 import TicketList from "./pages/TicketList";
 import TicketDetail from "./pages/TicketDetail";
 import Reports from "./pages/Reports";
+import KnowledgeBase from "./pages/KnowledgeBase";
+import Settings from "./pages/Settings";
+import ServiceForm from "./pages/ServiceForm";
 
 function NavLink({ to, children }) {
   const { pathname } = useLocation();
@@ -12,8 +15,10 @@ function NavLink({ to, children }) {
   return (
     <Link
       to={to}
-      className={`px-3 py-2 rounded-md text-sm font-medium ${
-        active ? "bg-indigo-600 text-white" : "text-slate-600 hover:bg-slate-200"
+      className={`relative px-3 py-2 rounded-lg text-sm font-medium transition-all duration-200 ${
+        active
+          ? "text-white bg-gradient-to-br from-indigo-500/90 to-fuchsia-500/80 shadow-[0_0_16px_rgba(129,140,248,0.55)]"
+          : "text-slate-300 hover:text-white hover:bg-white/5"
       }`}
     >
       {children}
@@ -25,21 +30,25 @@ function Layout({ children }) {
   const { logout } = useAuth();
   return (
     <div className="min-h-screen">
-      <header className="bg-white border-b border-slate-200">
-        <div className="max-w-6xl mx-auto px-4 h-14 flex items-center gap-2">
-          <span className="font-bold text-indigo-600 mr-4">IT Ticket</span>
+      <header className="glass sticky top-0 z-20 shadow-[0_1px_0_rgba(255,255,255,0.06)]">
+        <div className="max-w-6xl mx-auto px-4 h-14 flex items-center gap-1">
+          <span className="font-bold text-lg text-glow mr-4 tracking-wide">
+            IT TICKET
+          </span>
           <NavLink to="/">ภาพรวม</NavLink>
           <NavLink to="/tickets">Tickets</NavLink>
           <NavLink to="/reports">รายงาน</NavLink>
+          <NavLink to="/kb">คลังความรู้</NavLink>
+          <NavLink to="/settings">ตั้งค่า</NavLink>
           <button
             onClick={logout}
-            className="ml-auto text-sm text-slate-500 hover:text-slate-800"
+            className="ml-auto text-sm text-slate-400 hover:text-fuchsia-300 transition-colors"
           >
             ออกจากระบบ
           </button>
         </div>
       </header>
-      <main className="max-w-6xl mx-auto px-4 py-6">{children}</main>
+      <main className="max-w-6xl mx-auto px-4 py-6 animate-fadein">{children}</main>
     </div>
   );
 }
@@ -54,10 +63,13 @@ export default function App() {
   return (
     <Routes>
       <Route path="/login" element={<Login />} />
+      <Route path="/liff/form" element={<ServiceForm />} />
       <Route path="/" element={<Protected><Dashboard /></Protected>} />
       <Route path="/tickets" element={<Protected><TicketList /></Protected>} />
       <Route path="/tickets/:id" element={<Protected><TicketDetail /></Protected>} />
       <Route path="/reports" element={<Protected><Reports /></Protected>} />
+      <Route path="/kb" element={<Protected><KnowledgeBase /></Protected>} />
+      <Route path="/settings" element={<Protected><Settings /></Protected>} />
     </Routes>
   );
 }

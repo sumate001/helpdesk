@@ -54,6 +54,7 @@
 | Line Integration | Line Messaging API (OA Webhook + Group Notify) |
 | Backend | FastAPI + Python 3.11 |
 | AI Classify & Response | gemma4:12b via Ollama (http://100.94.37.18:11434) |
+| RAG | pgvector + Ollama embedding (bge-m3) — ความรู้ระบบ/นโยบาย IT |
 | Database | PostgreSQL |
 | ORM | SQLAlchemy 2.0 + Alembic |
 | Auth | JWT (IT Staff login) |
@@ -189,7 +190,8 @@ description         TEXT
 category            VARCHAR(50)   -- hardware|software|network|account|service_request|equipment_request|other
 type                VARCHAR(5)    -- L1|L2
 priority            VARCHAR(20)   -- low|medium|high|critical
-status              VARCHAR(30)   -- open|pending_approval|in_progress|resolved|closed
+status              VARCHAR(30)   -- open|pending_approval|in_progress|resolved|closed|ai_answered
+                                  -- ai_answered = AI แนะนำแล้วผู้ใช้บอกว่าหาย (เก็บสถิติ ไม่แจ้ง IT)
 assigned_to         INTEGER REFERENCES users(id)
 ai_response         TEXT          -- ข้อความที่ AI ตอบไปครั้งแรก
 sla_policy_id       INTEGER REFERENCES sla_policies(id)
@@ -252,6 +254,21 @@ line_message_id  VARCHAR(100) UNIQUE NOT NULL  -- id จาก sentMessages[].id
 created_at       TIMESTAMP                     -- เก็บ 30 วันแล้วล้าง
 ```
 
+### Table: `kb_chunks` — knowledge base สำหรับ RAG
+```sql
+id          SERIAL PRIMARY KEY
+title       VARCHAR(255)              -- หัวข้อ เช่น "การขอใช้ VPN"
+content     TEXT NOT NULL            -- เนื้อหา (1 หัวข้อ/1 chunk)
+category    VARCHAR(50)              -- map เข้ากับ category ticket ได้
+source      VARCHAR(255)             -- ที่มา ไว้ debug
+embedding   vector(EMBED_DIM)        -- pgvector (bge-m3 = 1024) + HNSW cosine index
+is_active   BOOLEAN DEFAULT true
+created_at  TIMESTAMP
+updated_at  TIMESTAMP
+```
+ต้องใช้ Postgres image ที่มี extension vector (`pgvector/pgvector:pg15`) —
+migration `0005_kb_chunks` รัน `CREATE EXTENSION vector` + สร้าง HNSW index ให้
+
 ### Table: `conversations` — multi-turn intake state (1-1 + กลุ่ม)
 ```sql
 id              SERIAL PRIMARY KEY
@@ -262,6 +279,7 @@ status          VARCHAR(10) NOT NULL   -- active | closed
 transcript      TEXT NOT NULL          -- JSON: [{role, content}, ...]
 pending_images  TEXT NOT NULL          -- JSON: รูปที่รอผูก ticket ตอนยังไม่เปิด
 ticket_id       INTEGER REFERENCES tickets(id)
+followup_sent_at TIMESTAMP             -- follow-up: ส่งถามซ้ำไปเมื่อไหร่ (NULL = ยังไม่ส่ง)
 expires_at      TIMESTAMP NOT NULL     -- ต่ออายุทุก turn (CONVERSATION_MINUTES = 15)
 created_at      TIMESTAMP NOT NULL
 updated_at      TIMESTAMP NOT NULL
@@ -284,23 +302,25 @@ updated_at      TIMESTAMP NOT NULL
 - ปัญหา Broadcast equipment
 - ปัญหาที่ซับซ้อน / ส่งผลกระทบหลายคน
 
-### Follow-up Flow (L1)
+### Follow-up Flow (ผู้ใช้เงียบกลางบทสนทนา intake)
+
+เกาะกับตาราง `conversations` — ทำงานเมื่อบอทถาม/แนะนำไว้แล้วผู้ใช้ "เงียบ"
+(conversation ยัง active, ยังไม่มี ticket, ข้อความสุดท้ายเป็นของบอท):
 
 ```
-T+0   : AI ตอบ + ส่ง Quick Reply ["แก้ได้แล้ว ✅", "ยังไม่ได้ ❌"]
-T+10m : ถ้าไม่มี response → AI ส่งข้อความถามซ้ำ
-T+30m : ถ้ายังไม่มี response → Auto เปิด Ticket L2 + แจ้ง IT Group
+T+10m : ส่งข้อความถามซ้ำ + Quick Reply ["แก้ได้แล้ว ✅", "ยังไม่ได้ ❌"]
+        (push เข้ากลุ่มเดิมถ้าเป็นบทสนทนากลุ่ม / หาผู้ใช้ตรงๆ ถ้า 1-1)
+        + ต่ออายุ conversation ให้อยู่ถึงรอบ escalate
+T+30m : ยังเงียบต่อ → เปิด Ticket L2 (description = transcript ทั้งบทสนทนา)
+        + ผูก pending_images + แจ้ง IT Group + ปิด conversation
 ```
 
-User กด "แก้ได้แล้ว ✅":
-- Auto สร้าง Ticket (status = resolved, type = L1)
-- บันทึก AI response + timeline ลง DB
-- ไม่แจ้ง IT Group
-
-User กด "ยังไม่ได้ ❌":
-- Escalate เป็น L2 ทันที
-- เปิด Ticket (status = open)
-- แจ้ง Line Group IT
+- ผู้ใช้ตอบกลับระหว่างนี้ (รวมกดปุ่ม quick reply) → ข้อความเข้าบทสนทนา intake เดิมตามปกติ
+  (`updated_at` ขยับ → ไม่ escalate)
+- **สวิตช์เปิด/ปิดทั้ง flow**: setting `FOLLOWUP_ENABLED` — ค่าตั้งต้นจาก .env,
+  override สดได้จากหน้า Settings (เก็บใน `app_settings` ไม่ต้อง restart)
+- record การ escalate เก็บลง `ticket_followups` ไว้ทำสถิติ
+- `conversations.followup_sent_at` (migration `0008`) ใช้กันส่งถามซ้ำซ้ำสอง
 
 ### Approval Flow (L1 Service/Equipment Request)
 
@@ -332,6 +352,15 @@ TK-YYYYMMDD-XXXX
 
 conversation active ภายใน `CONVERSATION_MINUTES` (15 นาที) ต่ออายุทุก turn —
 ระหว่างนี้ข้อความ/รูปถัดมาของผู้ใช้คนเดิมถือว่าอยู่ในบทสนทนานี้ (ไม่ต้อง @ ซ้ำ)
+
+**RAG ระหว่าง intake:** ก่อนเรียก `intake_turn` จะ `rag_service.retrieve_context` ค้น
+`kb_chunks` จากข้อความผู้ใช้ แล้วป้อน `kb_context` ให้ AI (ช่วยทั้งตอบและ classify เช่น
+รู้ว่า VPN/WiFi ต้องขออนุมัติ) — embed/retrieve ล่ม → context ว่าง intake เดินต่อปกติ
+
+**กันบอทเข้าใจผิดในกลุ่ม:** เมื่อ conv active ในกลุ่ม ถ้าข้อความถัดมา "ไม่ได้คุยกับบอท"
+(คุยกับคนอื่น/เปลี่ยนเรื่อง) บอทจะเงียบ — ตัดสินด้วย `intake_turn(allow_ignore=True)` →
+`action="ignore"` (ไม่ตอบ/ไม่บันทึก/ไม่ต่ออายุ); ข้อความที่ `@mention` คนอื่นตัดทิ้งก่อน
+ไม่เรียก AI. ถ้าถูกเรียกตรงๆ (`@mention`/quote-reply/keyword) ถือว่าคุยกับบอทเสมอ
 
 **ในกลุ่ม** บอทจะ "เริ่ม" บทสนทนาเมื่อถูกเรียกผ่าน 3 ทาง:
 1. `@mention` บอท
@@ -385,6 +414,25 @@ GET /api/reports/top-issues   # หมวดที่เกิดบ่อย
 GET /api/reports/resolution-time  # avg resolution time
 ```
 
+### Knowledge Base (RAG — Admin only)
+```
+GET    /api/kb            # list KB chunks
+POST   /api/kb            # เพิ่ม chunk (auto-embed)
+PATCH  /api/kb/{id}       # แก้ (re-embed ถ้าแก้ content/title) หรือ toggle is_active
+DELETE /api/kb/{id}       # ลบ chunk
+```
+
+### Settings (Runtime AI config — Admin only)
+```
+GET   /api/settings                # ค่า effective ปัจจุบัน (+ EMBED_DIM read-only + list override)
+PATCH /api/settings                # แก้ OLLAMA_MODEL/EMBED_MODEL/BASE_URL/RAG_TOP_K/MIN_SIMILARITY/FOLLOWUP_ENABLED
+                                   #   ส่งค่าว่าง/null = ล้าง override กลับไปใช้ค่า .env
+GET   /api/settings/ollama-models  # รายชื่อ model ที่ pull ไว้บนเครื่อง Ollama (/api/tags)
+```
+override เก็บใน DB (`app_settings`) → โหลดเข้า in-memory cache ตอน start +
+อัปเดต cache ทุกครั้งที่ PATCH. `ai_service`/`rag_service` อ่านค่าผ่าน
+`settings_service.get(key)` ทำให้เปลี่ยน model/RAG params มีผลทันทีไม่ต้อง restart
+
 ---
 
 ## Environment Variables (.env)
@@ -407,6 +455,16 @@ LINE_GROUP_IT_ID=              # Group ID สำหรับ notify IT staff
 # Ollama (A5000 Server — ใช้ LAN IP ตรง latency ต่ำกว่า Tailscale)
 OLLAMA_BASE_URL=http://100.94.37.18:11434
 OLLAMA_MODEL=gemma4:12b
+
+# RAG embedding (ต้อง `ollama pull bge-m3` ที่ A5000 ก่อน)
+OLLAMA_EMBED_MODEL=bge-m3
+EMBED_DIM=1024              # bge-m3=1024, nomic-embed-text=768
+RAG_TOP_K=4
+RAG_MIN_SIMILARITY=0.4     # cosine similarity ต่ำกว่านี้ตัดทิ้ง
+# ค่าด้านบน (OLLAMA_BASE_URL, OLLAMA_MODEL, OLLAMA_EMBED_MODEL, RAG_TOP_K,
+# RAG_MIN_SIMILARITY) เป็น "ค่าตั้งต้น" — override ได้สดๆ จากหน้า Settings ใน
+# dashboard (เก็บใน DB ตาราง app_settings) ไม่ต้อง restart. EMBED_DIM แก้ผ่าน UI
+# ไม่ได้ เพราะผูกกับ vector column — เปลี่ยนต้องทำ migration + re-embed
 
 # MinIO
 MINIO_ENDPOINT=minio:9000

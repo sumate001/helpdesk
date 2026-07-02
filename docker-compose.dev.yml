@@ -3,6 +3,7 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile.dev
+    restart: unless-stopped
     volumes:
       - ./backend:/app
     ports:
@@ -17,6 +18,7 @@ services:
     build:
       context: ./frontend
       dockerfile: Dockerfile.dev
+    restart: unless-stopped
     volumes:
       - ./frontend:/app
       - /app/node_modules
@@ -26,7 +28,8 @@ services:
     command: npm run dev -- --host
 
   postgres:
-    image: postgres:15-alpine
+    image: pgvector/pgvector:pg15   # postgres 15 + extension vector สำหรับ RAG
+    restart: unless-stopped
     ports:
       - "5432:5432"
     environment:
@@ -38,6 +41,7 @@ services:
 
   minio:
     image: minio/minio
+    restart: unless-stopped
     ports:
       - "9000:9000"
       - "9001:9001"
@@ -50,11 +54,15 @@ services:
 
   ngrok:
     image: ngrok/ngrok:latest
+    restart: unless-stopped
     ports:
       - "4040:4040"
     env_file: .env.dev
-    command: http backend:8000
+    # ชี้ไป frontend → Vite proxy /api + /webhook ไป backend ให้ domain เดียวเสิร์ฟครบ
+    # (รองรับ LIFF form ที่อยู่ฝั่ง frontend โดยใช้ ngrok domain เดิม)
+    command: http frontend:3000 --url https://untemptable-rosamond-bivoltine.ngrok-free.dev
     depends_on:
+      - frontend
       - backend
 
 volumes:

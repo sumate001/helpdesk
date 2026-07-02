@@ -23,6 +23,8 @@ class Conversation(Base):
     transcript: Mapped[str] = mapped_column(Text, default="[]")  # JSON list ของ {role, content}
     pending_images: Mapped[str] = mapped_column(Text, default="[]")  # JSON list รูปที่รอผูก ticket
     ticket_id: Mapped[int | None] = mapped_column(ForeignKey("tickets.id"))
+    # follow-up: ส่งข้อความถามซ้ำไปแล้วเมื่อไหร่ (NULL = ยังไม่ส่ง) — ใช้กันส่งซ้ำ
+    followup_sent_at: Mapped[datetime | None] = mapped_column(DateTime)
     expires_at: Mapped[datetime] = mapped_column(DateTime)
     created_at: Mapped[datetime] = mapped_column(DateTime)
     updated_at: Mapped[datetime] = mapped_column(DateTime)

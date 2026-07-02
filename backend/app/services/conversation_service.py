@@ -71,9 +71,16 @@ def get_transcript(conv: Conversation) -> list[dict]:
     return json.loads(conv.transcript or "[]")
 
 
-def append_message(db: Session, conv: Conversation, role: str, content: str) -> None:
+def append_message(
+    db: Session, conv: Conversation, role: str, content: str, needs_confirm: bool = False
+) -> None:
+    """needs_confirm: เทิร์น assistant ที่ขึ้นปุ่มยืนยันเปิด ticket — เก็บ marker ไว้ใน
+    transcript เพื่อให้เทิร์นถัดไปตรวจได้ว่า "ผ่านการขอยืนยันมาแล้ว" ก่อนยอมเปิด ticket."""
     history = get_transcript(conv)
-    history.append({"role": role, "content": content})
+    entry: dict = {"role": role, "content": content}
+    if needs_confirm:
+        entry["needs_confirm"] = True
+    history.append(entry)
     conv.transcript = json.dumps(history, ensure_ascii=False)
     conv.updated_at = _now()
     conv.expires_at = _expiry()

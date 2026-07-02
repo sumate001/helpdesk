@@ -7,6 +7,47 @@ import CommentBox from "../components/CommentBox";
 
 const STATUS_OPTIONS = ["open", "in_progress", "resolved", "closed"];
 
+function AttachmentPreview({ ticketId, attachment }) {
+  const [url, setUrl] = useState(null);
+  const isImage = attachment.mime_type?.startsWith("image/");
+
+  useEffect(() => {
+    if (!isImage) return;
+    let objectUrl;
+    api
+      .get(`/tickets/${ticketId}/attachments/${attachment.id}/file`, {
+        responseType: "blob",
+      })
+      .then(({ data }) => {
+        objectUrl = URL.createObjectURL(data);
+        setUrl(objectUrl);
+      });
+    return () => {
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [ticketId, attachment.id, isImage]);
+
+  if (!isImage) {
+    return <li className="text-sm text-slate-400">{attachment.file_name}</li>;
+  }
+
+  return (
+    <li className="list-none">
+      {url ? (
+        <a href={url} target="_blank" rel="noreferrer">
+          <img
+            src={url}
+            alt={attachment.file_name}
+            className="max-w-xs rounded-lg ring-1 ring-white/10 hover:ring-indigo-400/50 transition-all"
+          />
+        </a>
+      ) : (
+        <p className="text-sm text-slate-500">กำลังโหลดรูป...</p>
+      )}
+    </li>
+  );
+}
+
 function EquipmentApproval({ ticketId, request, onChange, onDecide }) {
   const [itemName, setItemName] = useState(request?.item_name || "");
   const [quantity, setQuantity] = useState(request?.quantity || 1);
@@ -34,23 +75,23 @@ function EquipmentApproval({ ticketId, request, onChange, onDecide }) {
   }
 
   return (
-    <div className="mt-4 border border-amber-200 bg-amber-50 rounded-lg p-4">
-      <p className="font-medium text-amber-800 mb-2">คำขอเบิกอุปกรณ์ (ตรวจสอบก่อนอนุมัติ)</p>
+    <div className="mt-4 ring-1 ring-amber-400/30 bg-amber-400/5 rounded-xl p-4">
+      <p className="font-medium text-amber-300 mb-2">คำขอเบิกอุปกรณ์ (ตรวจสอบก่อนอนุมัติ)</p>
       <div className="flex flex-wrap gap-3 items-end">
         <label className="text-sm">
-          <span className="block text-slate-500 mb-1">รายการ</span>
+          <span className="block text-slate-400 mb-1">รายการ</span>
           <input
-            className="border border-slate-300 rounded-md p-1.5 text-sm"
+            className="input-dark rounded-lg p-1.5 text-sm"
             value={itemName}
             onChange={(e) => setItemName(e.target.value)}
           />
         </label>
         <label className="text-sm">
-          <span className="block text-slate-500 mb-1">จำนวน</span>
+          <span className="block text-slate-400 mb-1">จำนวน</span>
           <input
             type="number"
             min={1}
-            className="border border-slate-300 rounded-md p-1.5 text-sm w-24"
+            className="input-dark rounded-lg p-1.5 text-sm w-24"
             value={quantity}
             onChange={(e) => setQuantity(e.target.value)}
           />
@@ -59,7 +100,7 @@ function EquipmentApproval({ ticketId, request, onChange, onDecide }) {
           <button
             onClick={save}
             disabled={saving}
-            className="text-sm border border-amber-400 text-amber-700 rounded-md px-3 py-1.5 disabled:opacity-50"
+            className="text-sm ring-1 ring-amber-400/50 text-amber-300 rounded-lg px-3 py-1.5 hover:bg-amber-400/10 disabled:opacity-50 transition-colors"
           >
             บันทึกการแก้ไข
           </button>
@@ -67,7 +108,7 @@ function EquipmentApproval({ ticketId, request, onChange, onDecide }) {
       </div>
       <ApprovalButtons onDecide={onDecide} disabled={dirty} />
       {dirty && (
-        <p className="text-xs text-amber-600 mt-1">* บันทึกการแก้ไขก่อนจึงจะอนุมัติได้</p>
+        <p className="text-xs text-amber-400 mt-1">* บันทึกการแก้ไขก่อนจึงจะอนุมัติได้</p>
       )}
     </div>
   );
@@ -79,14 +120,14 @@ function ApprovalButtons({ onDecide, disabled }) {
       <button
         onClick={() => onDecide("approve")}
         disabled={disabled}
-        className="bg-green-600 text-white px-4 py-1.5 rounded-md text-sm disabled:opacity-50"
+        className="bg-gradient-to-br from-green-500 to-emerald-500 text-white px-4 py-1.5 rounded-lg text-sm font-medium shadow-[0_0_16px_rgba(74,222,128,0.3)] hover:shadow-[0_0_22px_rgba(74,222,128,0.5)] disabled:opacity-50 disabled:shadow-none transition-all"
       >
         อนุมัติ
       </button>
       <button
         onClick={() => onDecide("reject")}
         disabled={disabled}
-        className="bg-red-600 text-white px-4 py-1.5 rounded-md text-sm disabled:opacity-50"
+        className="bg-gradient-to-br from-red-500 to-rose-500 text-white px-4 py-1.5 rounded-lg text-sm font-medium shadow-[0_0_16px_rgba(248,113,113,0.3)] hover:shadow-[0_0_22px_rgba(248,113,113,0.5)] disabled:opacity-50 disabled:shadow-none transition-all"
       >
         ปฏิเสธ
       </button>
@@ -122,21 +163,21 @@ export default function TicketDetail() {
     load();
   }
 
-  if (!ticket) return <p className="text-slate-400">กำลังโหลด...</p>;
+  if (!ticket) return <p className="text-slate-500">กำลังโหลด...</p>;
 
   return (
-    <div className="max-w-3xl space-y-6">
-      <div className="bg-white rounded-lg shadow-sm p-6 border border-slate-200">
+    <div className="max-w-3xl space-y-6 animate-fadein">
+      <div className="glass rounded-xl p-6">
         <div className="flex items-center justify-between">
-          <span className="font-mono text-sm text-slate-500">{ticket.ticket_no}</span>
+          <span className="font-mono text-sm text-slate-400">{ticket.ticket_no}</span>
           <div className="flex gap-2">
             <StatusBadge status={ticket.status} />
             <PriorityBadge priority={ticket.priority} />
           </div>
         </div>
-        <h1 className="text-xl font-bold mt-2">{ticket.title}</h1>
-        <p className="text-slate-600 mt-2 whitespace-pre-wrap">{ticket.description}</p>
-        <div className="text-sm text-slate-500 mt-4 grid grid-cols-2 gap-2">
+        <h1 className="text-xl font-bold mt-2 text-glow">{ticket.title}</h1>
+        <p className="text-slate-300 mt-2 whitespace-pre-wrap">{ticket.description}</p>
+        <div className="text-sm text-slate-400 mt-4 grid grid-cols-2 gap-2">
           <span>ผู้แจ้ง: {ticket.line_user?.display_name || "-"}</span>
           <span>แผนก: {ticket.line_user?.department || "-"}</span>
           <span>หมวด: {ticket.category}</span>
@@ -144,9 +185,9 @@ export default function TicketDetail() {
         </div>
 
         {ticket.ai_response && (
-          <div className="mt-4 bg-emerald-50 border border-emerald-200 rounded p-3 text-sm">
-            <p className="font-medium text-emerald-700">AI ตอบครั้งแรก:</p>
-            <p className="text-slate-700 mt-1">{ticket.ai_response}</p>
+          <div className="mt-4 bg-teal-400/5 ring-1 ring-teal-400/30 rounded-xl p-3 text-sm">
+            <p className="font-medium text-teal-300">AI ตอบครั้งแรก:</p>
+            <p className="text-slate-300 mt-1">{ticket.ai_response}</p>
           </div>
         )}
 
@@ -155,7 +196,7 @@ export default function TicketDetail() {
             <button
               key={s}
               onClick={() => updateStatus(s)}
-              className="text-sm border border-slate-300 rounded-md px-3 py-1 hover:bg-slate-50"
+              className="text-sm ring-1 ring-white/10 rounded-lg px-3 py-1 text-slate-300 hover:bg-white/5 hover:ring-indigo-400/40 hover:text-white transition-all"
             >
               → {s}
             </button>
@@ -173,35 +214,37 @@ export default function TicketDetail() {
       </div>
 
       {ticket.attachments?.length > 0 && (
-        <div className="bg-white rounded-lg shadow-sm p-6 border border-slate-200">
-          <h2 className="font-semibold mb-2">ไฟล์แนบ</h2>
-          <ul className="text-sm text-slate-600 list-disc pl-5">
+        <div className="glass rounded-xl p-6">
+          <h2 className="font-semibold mb-2 text-slate-100">ไฟล์แนบ</h2>
+          <ul className="flex flex-wrap gap-3">
             {ticket.attachments.map((a) => (
-              <li key={a.id}>{a.file_name}</li>
+              <AttachmentPreview key={a.id} ticketId={id} attachment={a} />
             ))}
           </ul>
         </div>
       )}
 
-      <div className="bg-white rounded-lg shadow-sm p-6 border border-slate-200 space-y-4">
-        <h2 className="font-semibold">ความคิดเห็น / Activity</h2>
+      <div className="glass rounded-xl p-6 space-y-4">
+        <h2 className="font-semibold text-slate-100">ความคิดเห็น / Activity</h2>
         <div className="space-y-3">
           {ticket.comments?.map((c) => (
             <div
               key={c.id}
-              className={`text-sm p-3 rounded ${
-                c.is_internal ? "bg-amber-50" : "bg-slate-50"
+              className={`text-sm p-3 rounded-lg ring-1 ${
+                c.is_internal
+                  ? "bg-amber-400/5 ring-amber-400/20"
+                  : "bg-white/5 ring-white/10"
               }`}
             >
-              <p className="whitespace-pre-wrap">{c.content}</p>
-              <p className="text-xs text-slate-400 mt-1">
+              <p className="whitespace-pre-wrap text-slate-200">{c.content}</p>
+              <p className="text-xs text-slate-500 mt-1">
                 {c.is_internal ? "ภายใน · " : ""}
                 {new Date(c.created_at).toLocaleString("th-TH")}
               </p>
             </div>
           ))}
           {ticket.comments?.length === 0 && (
-            <p className="text-slate-400 text-sm">ยังไม่มีความคิดเห็น</p>
+            <p className="text-slate-500 text-sm">ยังไม่มีความคิดเห็น</p>
           )}
         </div>
         <CommentBox onSubmit={addComment} />

@@ -1,14 +1,14 @@
 const MAP = {
-  low: ["ต่ำ", "bg-slate-100 text-slate-600"],
-  medium: ["กลาง", "bg-sky-100 text-sky-700"],
-  high: ["สูง", "bg-orange-100 text-orange-700"],
-  critical: ["วิกฤต", "bg-red-100 text-red-700"],
+  low: ["ต่ำ", "bg-slate-400/10 text-slate-300 ring-slate-400/30"],
+  medium: ["กลาง", "bg-sky-400/10 text-sky-300 ring-sky-400/30"],
+  high: ["สูง", "bg-orange-400/10 text-orange-300 ring-orange-400/30"],
+  critical: ["วิกฤต", "bg-red-400/10 text-red-300 ring-red-400/30 animate-pulse-glow"],
 };
 
 export default function PriorityBadge({ priority }) {
-  const [label, cls] = MAP[priority] || [priority, "bg-slate-100 text-slate-600"];
+  const [label, cls] = MAP[priority] || [priority, "bg-slate-400/10 text-slate-300 ring-slate-400/30"];
   return (
-    <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${cls}`}>
+    <span className={`inline-flex items-center px-2.5 py-1 rounded-full text-xs font-medium ring-1 ring-inset ${cls}`}>
       {label}
     </span>
   );
