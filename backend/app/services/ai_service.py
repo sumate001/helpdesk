@@ -136,7 +136,7 @@ B) ต้องให้ทีม IT ลงมือ (L2) หรือเป็�
 
 ห้ามถามทีละข้อหลายรอบ — เลือกเฉพาะที่ขาดและเกี่ยวข้อง รวมถามครั้งเดียวให้ครบในข้อความเดียว กระชับ เป็นข้อๆ ได้
 
-*** ลำดับสำคัญ: เทิร์นที่คุณ "ขอข้อมูลผู้แจ้ง (ชื่อ/อาคาร/ชั้น)" ต้องตั้ง needs_confirm=false เสมอ — ห้ามขอข้อมูลแล้วขึ้นปุ่มยืนยันในเทิร์นเดียวกัน ต้องรอผู้ใช้ตอบข้อมูลก่อน เทิร์นถัดไปที่ข้อมูลครบแล้วค่อยสรุป+ยืนยัน ***
+*** ลำดับสำคัญ: เทิร์นที่คุณ "ขอข้อมูลใดๆ ก็ตาม" (ชื่อ/อาคาร/ชั้น/อาการ/รุ่นเครื่อง/asset tag/จำนวน/เหตุผล ฯลฯ) ต้องตั้ง needs_confirm=false เสมอ — ห้ามขอข้อมูลแล้วขึ้นปุ่มยืนยันในเทิร์นเดียวกัน ต้องรอผู้ใช้ตอบข้อมูลก่อน เทิร์นถัดไปที่ข้อมูลครบแล้วค่อยสรุป+ยืนยัน ***
 
 เมื่อได้ข้อมูลครบ → สรุปสั้นๆ แล้วถามยืนยันเปิด Ticket (action="ask", needs_confirm=true)
 *** กฎสำคัญ: ทุกครั้งที่ reply ของคุณ "เอ่ยถึงการเปิดเคส/ถามว่าจะเปิด Ticket ให้ไหม/สรุปเรื่องเพื่อเตรียมเปิด" ต้องตั้ง needs_confirm=true ในข้อความเดียวกันนั้นเสมอ — ห้ามสรุปแล้วถามยืนยันโดยปล่อย needs_confirm=false (ปุ่มยืนยันจะไม่ขึ้น ผู้ใช้ต้องทวงซ้ำ ซึ่งผิด) ***
@@ -161,6 +161,17 @@ priority: low, medium, high, critical | type: L1 หรือ L2
 - full_name/building/floor ใส่เมื่อทราบ (จากผู้ใช้หรือจากข้อมูลที่ทราบแล้ว) ไม่งั้น null"""
 
 VALID_ACTIONS = {"ask", "resolved", "open"}
+
+CONFIRM_OPEN_TEXT = "เปิด Ticket ✅"  # ข้อความจากปุ่ม quick reply "confirm"
+
+
+def _confirm_was_requested(history: list[dict]) -> bool:
+    """เทิร์น assistant ล่าสุดใน history ขึ้นปุ่มยืนยันเปิด ticket ไปหรือยัง
+    (webhook เก็บ marker needs_confirm ไว้ใน transcript)."""
+    for m in reversed(history):
+        if m["role"] == "assistant":
+            return bool(m.get("needs_confirm"))
+    return False
 
 # วลีที่บ่งว่า reply กำลัง "สรุป + ขอยืนยันเปิดเคส" → ควรขึ้นปุ่มยืนยันเสมอ
 _CONFIRM_HINTS = (
@@ -205,6 +216,56 @@ def _reply_has_extra_question(reply: str) -> bool:
     return _count_questions(reply) > 1
 
 
+def _question_sentences(reply: str) -> list[str]:
+    """แยกประโยคคำถามใน reply ออกมาเป็น list — ใช้ "?" เป็นหลัก (เอาท่อนข้อความ
+    ก่อน "?" ในบรรทัดเดียวกันเป็นตัวคำถาม), ไม่มี "?" เลยค่อย fallback หา marker รายบรรทัด."""
+    text = reply or ""
+    if "?" in text:
+        questions = []
+        for seg in text.split("?")[:-1]:
+            q = seg.split("\n")[-1].strip()
+            if q:
+                questions.append(q)
+        return questions
+    lines = [l.strip() for l in text.split("\n") if l.strip()]
+    return [l for l in lines if any(m in l for m in _QUESTION_WORD_MARKERS)]
+
+
+# คำที่บ่งว่าประโยคคำถามนั้นคือ "คำถามยืนยันเปิดเคส" — คำถามที่ไม่มีคำพวกนี้ถือว่าเป็น
+# คำถามขอข้อมูล/วินิจฉัย (เช่น "อาการเป็นยังไง", "รุ่นอะไร") ซึ่งต้องรอคำตอบก่อน
+_CONFIRM_QUESTION_HINTS = ("เปิด", "ยืนยัน", "ดำเนินการ", "ถูกต้อง", "ticket", "เคส")
+
+# วลีคำสั่ง "ขอข้อมูล" — เจอที่ไหนใน reply ก็ถือว่าเทิร์นนี้กำลังรอคำตอบจากผู้ใช้
+# (ครอบคลุมทั้งประโยคคำถามผสม "ขอทราบรุ่น...แล้วจะเปิดเคสให้" และประโยคบอกเล่า
+# "รบกวนแจ้งชื่อ...ด้วยครับ" ที่ไม่มี "?"/marker คำถามเลย)
+_INFO_REQUEST_HINTS = (
+    "ขอทราบ",
+    "รบกวนแจ้ง",
+    "รบกวนบอก",
+    "รบกวนขอ",
+    "รบกวนระบุ",
+    "ช่วยแจ้ง",
+    "ช่วยบอก",
+    "ช่วยระบุ",
+    "ขอข้อมูล",
+    "ขอรายละเอียด",
+    "ขอชื่อ",
+    "พิมพ์มาตามที่เห็น",
+)
+
+
+def _has_info_question(reply: str) -> bool:
+    """True ถ้าเทิร์นนี้ยังขอข้อมูลจากผู้ใช้อยู่ (ไม่ใช่แค่ถามยืนยันเปิดเคส) —
+    ห้ามขึ้นปุ่มยืนยัน ต้องรอผู้ใช้ตอบข้อมูลก่อน."""
+    text = (reply or "").lower()
+    if any(h in text for h in _INFO_REQUEST_HINTS):
+        return True
+    return any(
+        not any(h in q.lower() for h in _CONFIRM_QUESTION_HINTS)
+        for q in _question_sentences(reply)
+    )
+
+
 def _has_required_identity(result: dict, known_info: dict | None) -> bool:
     """ข้อมูลผู้แจ้งครบหรือยัง (ชื่อ + อาคาร + ชั้น) — รวมจาก known_info (DB) กับที่ AI
     สกัดได้ในเทิร์นนี้. ใช้กันไม่ให้ขึ้นปุ่มยืนยันทั้งที่ยังถามข้อมูลผู้แจ้งไม่ครบ.
@@ -227,8 +288,6 @@ def _intake_fallback() -> dict:
     return {
         "reply": "ขอโทษครับ ระบบขัดข้องชั่วคราว ผมเปิดเรื่องส่งทีม IT ให้เลยนะครับ 🔧",
         "action": "open",
-        # AI ล่ม — เปิดโดยไม่ผ่านการยืนยัน (จงใจ กันเรื่องตกหล่น) → ให้ webhook ข้าม confirm guard
-        "fallback": True,
         "needs_confirm": False,
         "category": "other",
         "priority": "medium",
@@ -302,6 +361,21 @@ async def intake_turn(
     result["needs_confirm"] = _as_bool(result.get("needs_confirm"))
     result.setdefault("reply", "รบกวนเล่ารายละเอียดเพิ่มอีกนิดได้ไหมครับ")
 
+    # เปิด ticket ได้เฉพาะเมื่อ "ผ่านการยืนยัน" แล้ว: เทิร์นก่อนขึ้นปุ่มยืนยันไว้ หรือ
+    # ผู้ใช้กดปุ่มยืนยันตรงๆ — โมเดลข้ามขั้น (open ทันที) → ปรับเป็น ask แล้วปล่อยให้
+    # กฎด้านล่างตัดสินว่าเทิร์นนี้ควรขึ้นปุ่มหรือยัง (ถ้า reply ยังขอข้อมูลอยู่ ปุ่มจะไม่ขึ้น)
+    if result["action"] == "open":
+        last_user = next(
+            (m["content"] for m in reversed(history) if m["role"] == "user"), ""
+        )
+        confirmed = (
+            _confirm_was_requested(history[:-1])
+            or last_user.strip() == CONFIRM_OPEN_TEXT
+        )
+        if not confirmed:
+            result["action"] = "ask"
+            result["needs_confirm"] = True
+
     if result["action"] == "ask":
         if not _has_required_identity(result, known_info):
             # ยังเก็บข้อมูลผู้แจ้งไม่ครบ (ชื่อ/อาคาร/ชั้น) → ยังไม่ถึงขั้นยืนยัน
@@ -311,11 +385,14 @@ async def intake_turn(
             if not result["needs_confirm"] and _looks_like_confirm_request(result["reply"]):
                 # ข้อมูลครบแล้ว + reply เป็นการสรุป/ขอยืนยัน แต่โมเดลลืมตั้ง → บังคับขึ้นปุ่ม
                 result["needs_confirm"] = True
-            if result["needs_confirm"] and _reply_has_extra_question(result["reply"]):
-                # reply มีคำถามอื่นแฝงอยู่นอกเหนือจากคำถามยืนยัน (เช่นยังถามอาการ/ข้อมูลเพิ่มอยู่ หรือ
-                # แค่เอ่ยถึงการเปิดเคสแบบมีเงื่อนไข "ถ้ายังไม่หายจะเปิดเคส") — ต้องรอผู้ใช้ตอบคำถาม
-                # ที่ค้างก่อน ยังไม่ควรขึ้นปุ่มยืนยันในเทิร์นนี้ ไม่ว่า needs_confirm จะมาจากโมเดล
-                # หรือถูกบังคับตั้งจากด้านบนก็ตาม
+            if result["needs_confirm"] and (
+                _reply_has_extra_question(result["reply"])
+                or _has_info_question(result["reply"])
+            ):
+                # reply ยังมีคำถามค้างที่ต้องรอคำตอบ: มีหลายคำถามปนกัน หรือมีคำถาม "ขอข้อมูล/
+                # วินิจฉัย" อยู่ (แม้จะคำถามเดียว เช่น "ขอทราบรุ่นเครื่อง...แล้วจะเปิดเคสให้") —
+                # ต้องรอผู้ใช้ตอบข้อมูลก่อน ยังไม่ขึ้นปุ่มยืนยันในเทิร์นนี้ ไม่ว่า needs_confirm
+                # จะมาจากโมเดลหรือถูกบังคับตั้งจากด้านบนก็ตาม
                 result["needs_confirm"] = False
 
     if result["action"] in ("open", "resolved"):
