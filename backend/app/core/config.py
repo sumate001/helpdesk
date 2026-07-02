@@ -33,9 +33,13 @@ class Settings(BaseSettings):
     EMBED_DIM: int = 1024            # bge-m3 = 1024, nomic-embed-text = 768
     RAG_TOP_K: int = 4              # ดึง chunk ที่ใกล้สุดกี่อัน
     RAG_MIN_SIMILARITY: float = 0.4  # cosine similarity ต่ำกว่านี้ถือว่าไม่เกี่ยว ตัดทิ้ง
-    # threshold สำหรับ "ยื่นฟอร์ม" — เข้มกว่า RAG ทั่วไป กันบอทเด้งฟอร์มผิดเรื่อง
-    # (เรื่อง VPN วัดได้ ~0.59-0.73, เรื่อง hardware ~0.39-0.43 → 0.55 อยู่กลางช่องว่าง)
-    FORM_MIN_SIMILARITY: float = 0.55
+    # threshold สำหรับ "ยื่นฟอร์ม" — เข้มกว่า RAG ทั่วไปมาก กันบอทเด้งฟอร์มผิดเรื่อง
+    # (แมตช์ถูก เช่น "ขอใช้ VPN"→ฟอร์ม VPN วัดได้ ~0.75, แมตช์ผิด เช่น
+    # "ขอย้ายเครื่อง"→ฟอร์มเบิกอุปกรณ์ ~0.59 → 0.65 อยู่กลางช่องว่าง)
+    FORM_MIN_SIMILARITY: float = 0.65
+    # ต้องชนะฟอร์มอันดับสอง "ขาด" ด้วย — แมตช์ผิดมักก้ำกึ่ง (ห่าง ~0.04)
+    # แมตช์ถูกทิ้งห่างชัด (~0.2) → กันคำสั้นๆ ที่ similarity เฟ้อทั้งกระดาน
+    FORM_MATCH_MARGIN: float = 0.08
 
     # MinIO
     MINIO_ENDPOINT: str = "minio:9000"

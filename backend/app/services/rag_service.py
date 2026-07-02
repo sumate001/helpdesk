@@ -71,9 +71,11 @@ async def retrieve_context(db: Session, query: str) -> str:
 async def find_form(db: Session, query: str):
     """ค้น KB จากข้อความผู้ใช้ → คืน ServiceForm ที่ผูกกับ chunk ที่ "ใกล้สุดจริงๆ" ถ้ามี.
 
-    ใช้ threshold เข้มกว่าการดึง context ทั่วไป (FORM_MIN_SIMILARITY) และพิจารณาเฉพาะ
-    chunk ที่ใกล้สุด (top-1) เท่านั้น — กันบอทเด้งฟอร์มผิดเรื่อง (เช่น "เครื่องเปิดไม่ติด"
-    ไปแมตช์ฟอร์ม VPN เพราะ chunk มีน้อย). คืน None ถ้าไม่ใกล้พอ/embed ล่ม/ไม่ได้ผูกฟอร์ม.
+    เกณฑ์ 2 ชั้น กันเด้งฟอร์มผิดเรื่อง (เช่น "ขอย้ายเครื่อง" ไปโดนฟอร์มเบิกอุปกรณ์):
+    1. top-1 ต้องใกล้จริง (FORM_MIN_SIMILARITY — เข้มกว่าการดึง context ทั่วไปมาก)
+    2. ต้องชนะฟอร์มอื่นที่ใกล้รองลงมา "ขาด" (FORM_MATCH_MARGIN) — แมตช์ผิดมัก
+       ก้ำกึ่งกันทั้งกระดาน แมตช์ถูกจะทิ้งห่างชัด
+    คืน None ถ้าไม่ผ่านเกณฑ์/embed ล่ม/ไม่ได้ผูกฟอร์ม.
     """
     from app.models.service_form import ServiceForm
 
@@ -84,16 +86,22 @@ async def find_form(db: Session, query: str):
         return None
 
     distance = KbChunk.embedding.cosine_distance(emb).label("distance")
-    row = (
+    rows = (
         db.query(KbChunk, distance)
         .filter(KbChunk.is_active.is_(True), KbChunk.form_id.isnot(None))
         .order_by(distance)
-        .first()
+        .limit(5)
+        .all()
     )
-    if row is None:
+    if not rows:
         return None
-    chunk, dist = row
-    if (1 - dist) < settings.FORM_MIN_SIMILARITY:
+    chunk, dist = rows[0]
+    top_sim = 1 - dist
+    if top_sim < settings.FORM_MIN_SIMILARITY:
+        return None
+    # margin เทียบกับ chunk ที่ใกล้รองลงมาซึ่งผูก "ฟอร์มคนละตัว" (ฟอร์มเดียวกันหลาย chunk ไม่นับ)
+    runner_up = next((1 - d for c, d in rows[1:] if c.form_id != chunk.form_id), None)
+    if runner_up is not None and (top_sim - runner_up) < settings.FORM_MATCH_MARGIN:
         return None
     form = db.get(ServiceForm, chunk.form_id)
     return form if form and form.is_active else None

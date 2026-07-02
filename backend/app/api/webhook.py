@@ -25,7 +25,6 @@ router = APIRouter(prefix="/webhook", tags=["webhook"])
 
 RESOLVED_TEXT = "แก้ได้แล้ว ✅"
 NOT_RESOLVED_TEXT = "ยังไม่ได้ ❌"
-CONFIRM_OPEN_TEXT = "เปิด Ticket ✅"  # ปุ่มยืนยันเปิด ticket (quick reply "confirm")
 APPROVAL_CATEGORIES = ("equipment_request", "service_request")
 IMAGE_PLACEHOLDER = "[ผู้ใช้ส่งรูปภาพ]"
 
@@ -89,6 +88,12 @@ async def _maybe_offer_form(db: Session, reply_token: str, text: str) -> bool:
 
 
 async def _handle_event(db: Session, event: dict) -> None:
+    # LINE ส่ง event ซ้ำเมื่อเราตอบ 200 ไม่ทัน (เช่น Ollama ช้า) — ประมวลผลซ้ำจะทำให้
+    # ข้อความเบิ้ลใน transcript และ handler สองตัวเขียนทับกัน (lost update) → ข้ามทิ้ง
+    if (event.get("deliveryContext") or {}).get("isRedelivery"):
+        logger.info("skip redelivered event %s", event.get("webhookEventId"))
+        return
+
     etype = event.get("type")
     source = event.get("source", {})
     line_user_id = source.get("userId")
@@ -280,14 +285,6 @@ def _create_ticket_from_intake(
     return ticket
 
 
-def _confirm_was_requested(history: list[dict]) -> bool:
-    """เทิร์น assistant ล่าสุด (ก่อนข้อความปัจจุบัน) ขึ้นปุ่มยืนยันเปิด ticket ไปหรือยัง."""
-    for m in reversed(history):
-        if m["role"] == "assistant":
-            return bool(m.get("needs_confirm"))
-    return False
-
-
 def _rag_query(candidate_history: list[dict]) -> str:
     """รวมข้อความผู้ใช้ 3 turn ล่าสุดเป็น query ค้น KB — turn สั้นๆ ("ชั้น 5 ครับ")
     ลำพังจะค้นไม่เจอ/เจอผิดเรื่อง ต้องมีบริบทของปัญหาจาก turn ก่อนๆ ประกอบ."""
@@ -330,15 +327,6 @@ async def _run_intake(
     if result["action"] == "ignore":
         # ข้อความนี้คุยกับคนอื่นในกลุ่ม ไม่ใช่กับบอท → ไม่ตอบ ไม่บันทึก ไม่ต่ออายุ conversation
         return
-
-    # เปิด ticket ได้เฉพาะเมื่อ "ผ่านการยืนยัน" แล้วเท่านั้น: เทิร์นก่อนขึ้นปุ่มยืนยันไว้
-    # หรือผู้ใช้กดปุ่ม/พิมพ์ยืนยันตอบปุ่มนั้น — โมเดลข้ามขั้น (open ทันที) → บังคับกลับไป
-    # ขอยืนยันก่อน (ยกเว้น fallback ตอน AI ล่ม ที่จงใจเปิดเลยกันเรื่องตกหล่น)
-    if result["action"] == "open" and not result.get("fallback"):
-        confirmed = _confirm_was_requested(candidate_history[:-1]) or msg == CONFIRM_OPEN_TEXT
-        if not confirmed:
-            result["action"] = "ask"
-            result["needs_confirm"] = True
 
     conversation_service.append_message(db, conv, "user", msg)
     conversation_service.append_message(
