@@ -139,7 +139,7 @@ async def notify_group(text: str) -> list[str]:
 async def _post(path: str, payload: dict) -> list[str]:
     """ส่งข้อความ แล้วคืน list ของ message id ที่ LINE ตอบกลับใน sentMessages."""
     if not settings.LINE_CHANNEL_ACCESS_TOKEN:
-        logger.info("LINE token not set, skip send: %s", payload)
+        logger.info("LINE token not set, skip send to path %s", path)
         return []
     async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.post(LINE_API + path, headers=_headers(), json=payload)
@@ -176,7 +176,7 @@ async def verify_id_token(id_token: str) -> dict | None:
             data={"id_token": id_token, "client_id": settings.LINE_CHANNEL_ID},
         )
     if resp.status_code >= 400:
-        logger.warning("verify id_token failed %s: %s", resp.status_code, resp.text)
+        logger.warning("verify id_token failed with status %s", resp.status_code)
         return None
     return resp.json()
 
