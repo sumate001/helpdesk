@@ -31,7 +31,7 @@ services:
     image: pgvector/pgvector:pg15   # postgres 15 + extension vector สำหรับ RAG
     restart: unless-stopped
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"   # เฉพาะ localhost — ไม่ expose ออก LAN/Tailscale
     environment:
       POSTGRES_USER: itticket
       POSTGRES_PASSWORD: itticket
@@ -43,8 +43,8 @@ services:
     image: minio/minio
     restart: unless-stopped
     ports:
-      - "9000:9000"
-      - "9001:9001"
+      - "127.0.0.1:9000:9000"   # S3 API — backend เรียกผ่าน docker network อยู่แล้ว
+      - "9001:9001"             # console UI (เปิดจาก Mac ผ่าน Tailscale)
     environment:
       MINIO_ROOT_USER: minioadmin
       MINIO_ROOT_PASSWORD: minioadmin
