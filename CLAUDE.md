@@ -14,7 +14,7 @@
        ↓
 [FastAPI Webhook]
        ↓
-[AI Classify: L1 / L2]  ← gemma4:12b via Ollama
+[AI Classify: L1 / L2]  ← qwen3.6:35b via Ollama
       ↙              ↘
    L1                  L2
 [AI ตอบ]          [เปิด Ticket]
@@ -30,20 +30,18 @@
 
 ## Server Info
 
-| Server | Tailscale IP | Role |
+| Server | LAN IP | Role |
 |---|---|---|
-| A5000 (Ubuntu) | 100.94.37.18 | Ollama inference |
-| VM ใหม่ (Proxmox) | 100.94.37.52 | Line IT Ticket (this project) |
+| A5000 (Ubuntu) | 10.1.250.68 | Ollama inference (qwen3.6:35b + bge-m3) |
+| VM (Proxmox) | 10.7.255.228 | Line IT Ticket (this project) |
 
-**Network:** ทั้งสองอยู่ใน LAN เดียวกัน — VM เรียก Ollama ผ่าน LAN IP ได้โดยตรง
+**Network:** VM เรียก Ollama ผ่าน LAN IP ได้โดยตรง
 
-**Dev Access:**
-- Dashboard: `http://100.94.37.52:3000`
-- Backend API: `http://100.94.37.52:8000`
-- ngrok Inspector: `http://100.94.37.52:4040`
-- MinIO Console: `http://100.94.37.52:9001`
-
-เปิดจาก Mac ผ่าน Tailscale ได้เลยทุก URL
+**Access (production stack ผ่าน nginx):**
+- Dashboard: `http://10.7.255.228` (nginx port 80)
+- ngrok Inspector: `http://10.7.255.228:4040`
+- Line Webhook (public): `https://untemptable-rosamond-bivoltine.ngrok-free.dev/webhook/line`
+  (ngrok free static domain — รันเป็น service `ngrok` ใน docker-compose.yml, forward → backend:8000)
 
 ---
 
@@ -53,7 +51,7 @@
 |---|---|
 | Line Integration | Line Messaging API (OA Webhook + Group Notify) |
 | Backend | FastAPI + Python 3.11 |
-| AI Classify & Response | gemma4:12b via Ollama (http://100.94.37.18:11434) |
+| AI Classify & Response | qwen3.6:35b via Ollama (http://10.1.250.68:11434) |
 | RAG | pgvector + Ollama embedding (bge-m3) — ความรู้ระบบ/นโยบาย IT |
 | Database | PostgreSQL |
 | ORM | SQLAlchemy 2.0 + Alembic |
@@ -102,7 +100,7 @@ line-it-ticket/
 │       │   └── reports.py         # Dashboard stats
 │       └── services/
 │           ├── line_service.py    # Line Messaging API calls
-│           ├── ai_service.py      # Ollama gemma4:12b integration
+│           ├── ai_service.py      # Ollama qwen3.6:35b integration
 │           ├── ticket_service.py  # ticket business logic
 │           ├── sla_service.py     # SLA calculation + breach check
 │           ├── followup_service.py # follow-up scheduler jobs
@@ -339,7 +337,7 @@ TK-YYYYMMDD-XXXX
 ### Intake Flow (multi-turn — ใช้ทั้ง 1-1 และกลุ่ม)
 
 บอท **ไม่เปิด ticket จากข้อความเดียวทันที** แต่คุยเก็บข้อมูล/แก้ปัญหาก่อน ผ่าน `conversations`
-(`ai_service.intake_turn` ขับด้วย gemma4:12b, JSON action = ask|resolved|open):
+(`ai_service.intake_turn` ขับด้วย qwen3.6:35b, JSON action = ask|resolved|open):
 
 1. **ลอง L1 สั้นๆ** — แนะนำวิธีแก้ง่ายๆ ได้ไม่เกิน 1-2 ครั้ง (ไม่ถามวินิจฉัยวนยืดเยื้อ)
 2. ผู้ใช้บอกว่าหาย → `resolved`: เก็บ ticket สถานะ `ai_answered` (สถิติ) ปิด conversation
@@ -453,8 +451,8 @@ LINE_CHANNEL_SECRET=
 LINE_GROUP_IT_ID=              # Group ID สำหรับ notify IT staff
 
 # Ollama (A5000 Server — ใช้ LAN IP ตรง latency ต่ำกว่า Tailscale)
-OLLAMA_BASE_URL=http://100.94.37.18:11434
-OLLAMA_MODEL=gemma4:12b
+OLLAMA_BASE_URL=http://10.1.250.68:11434
+OLLAMA_MODEL=qwen3.6:35b
 
 # RAG embedding (ต้อง `ollama pull bge-m3` ที่ A5000 ก่อน)
 OLLAMA_EMBED_MODEL=bge-m3

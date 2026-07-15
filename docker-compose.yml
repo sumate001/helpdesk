@@ -41,6 +41,17 @@ services:
     expose:
       - "9000"
 
+  ngrok:
+    image: ngrok/ngrok:latest
+    restart: unless-stopped
+    ports:
+      - "4040:4040"             # inspector UI
+    environment:
+      NGROK_AUTHTOKEN: ${NGROK_AUTHTOKEN}
+    command: http --url=${NGROK_DOMAIN} backend:8000
+    depends_on:
+      - backend
+
   nginx:
     image: nginx:alpine
     restart: unless-stopped
