@@ -5,7 +5,13 @@ import StatusBadge from "../components/StatusBadge";
 import PriorityBadge from "../components/PriorityBadge";
 import CommentBox from "../components/CommentBox";
 
-const STATUS_OPTIONS = ["open", "in_progress", "resolved", "closed"];
+// ขั้นตอนงานตามระบบหลัก itamtv (รอจัดคิว → กำลังดำเนินการ → ดำเนินการเรียบร้อย) + ปิดงาน
+const STATUS_FLOW = [
+  { value: "open", label: "รอจัดคิว" },
+  { value: "in_progress", label: "กำลังดำเนินการ" },
+  { value: "resolved", label: "ดำเนินการเรียบร้อย" },
+  { value: "closed", label: "ปิดงาน" },
+];
 
 function AttachmentPreview({ ticketId, attachment }) {
   const [url, setUrl] = useState(null);
@@ -200,16 +206,26 @@ export default function TicketDetail() {
           </div>
         )}
 
-        <div className="flex flex-wrap gap-2 mt-5">
-          {STATUS_OPTIONS.map((s) => (
-            <button
-              key={s}
-              onClick={() => updateStatus(s)}
-              className="text-sm ring-1 ring-white/10 rounded-lg px-3 py-1 text-slate-300 hover:bg-white/5 hover:ring-indigo-400/40 hover:text-white transition-all"
-            >
-              → {s}
-            </button>
-          ))}
+        <div className="flex flex-wrap items-center gap-2 mt-5">
+          {STATUS_FLOW.map((s, i) => {
+            const active = ticket.status === s.value;
+            return (
+              <div key={s.value} className="flex items-center gap-2">
+                {i > 0 && <span className="text-slate-600 text-xs">→</span>}
+                <button
+                  onClick={() => updateStatus(s.value)}
+                  disabled={active}
+                  className={`text-sm rounded-lg px-3 py-1 transition-all ring-1 ${
+                    active
+                      ? "bg-indigo-500/20 ring-indigo-400/60 text-white"
+                      : "ring-white/10 text-slate-300 hover:bg-white/5 hover:ring-indigo-400/40 hover:text-white"
+                  }`}
+                >
+                  {s.label}
+                </button>
+              </div>
+            );
+          })}
           {ticket.assigned_to && !["resolved", "closed"].includes(ticket.status) && (
             <button
               onClick={notifyClose}

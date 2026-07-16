@@ -20,6 +20,7 @@ from app.core.config import get_settings
 from app.models.line_user import LineUser
 from app.models.ticket import Ticket
 from app.models.ticket_comment import TicketComment
+from app.models.user import User
 
 logger = logging.getLogger(__name__)
 
@@ -360,6 +361,87 @@ async def complete_case(job_no: str, token: str, people_code: str | None = None,
         # สเต็ป 2: ปิดเป็น 'ดำเนินการเรียบร้อย'
         return await _save_status(client, url, page, status=_STATUS_DONE,
                                   people_code=people_code, note=note)
+
+
+# สถานะ ticket ฝั่งเรา → ddlstatus ของ itamtv (เฉพาะที่หน้าเคสตั้งได้: 0/1/6)
+STATUS_TO_ITAMTV = {"open": "0", "in_progress": "1", "resolved": "6"}
+ITAMTV_TO_STATUS = {"0": "open", "1": "in_progress", "6": "resolved"}
+
+
+async def set_status(job_no: str, token: str, target: str, *,
+                     people_code: str | None = None, note: str | None = None) -> str:
+    """เซ็ต ddlstatus ของเคส itamtv เป็นค่า target ('0'|'1'|'6') ด้วย token ช่าง.
+
+    การไปถึง '6' (ดำเนินการเรียบร้อย) จากเคสสด ต้องผ่าน '1' ก่อน — delegate ให้
+    complete_case ที่จัดการ 2 สเต็ปไว้แล้ว.
+    """
+    if target == _STATUS_DONE:
+        return await complete_case(job_no, token, people_code=people_code, note=note)
+    root, _ = _base_url()
+    url = f"{root}Addjob.aspx?{token}&mode=display&Id={job_no}"
+    async with httpx.AsyncClient(timeout=30) as client:
+        page = (await client.get(url)).text
+        if "ddlstatus" not in page.lower():
+            raise RuntimeError("token นี้ไม่ใช่สิทธิ์ช่าง (ไม่มีช่องสถานะ)")
+        if _current_status(page) == target:
+            return "สถานะตรงอยู่แล้ว"
+        return await _save_status(client, url, page, status=target,
+                                  people_code=people_code, note=note)
+
+
+async def read_status(job_no: str, token: str) -> str | None:
+    """อ่านสถานะเคส itamtv ปัจจุบัน (ต้องใช้ token ช่าง) → คืน status ฝั่งเรา หรือ None."""
+    root, _ = _base_url()
+    url = f"{root}Addjob.aspx?{token}&mode=display&Id={job_no}"
+    async with httpx.AsyncClient(timeout=20) as client:
+        page = (await client.get(url)).text
+    if "ddlstatus" not in page.lower():
+        return None
+    return ITAMTV_TO_STATUS.get(_current_status(page))
+
+
+# ลำดับความคืบหน้าของ workflow — ใช้กัน sync ถอยหลัง
+_STATUS_RANK = {"open": 0, "in_progress": 1, "resolved": 2}
+
+
+def reconcile_statuses(db) -> None:
+    """ดึงสถานะจาก itamtv มาอัปเดต ticket ฝั่งเรา (ทิศ itamtv → dashboard).
+
+    เฉพาะ ticket ที่ยังไม่จบ (open/in_progress), มี itamtv_job_no และช่างที่รับผิดชอบ
+    ผูก token ไว้. อัปเดตเฉพาะเมื่อ itamtv "คืบหน้ากว่า" (กันเขียนทับย้อนหลัง).
+    """
+    if not get_settings().ITAMTV_ENABLED:
+        return
+    from datetime import datetime, timezone
+
+    rows = (
+        db.query(Ticket, User)
+        .join(User, Ticket.assigned_to == User.id)
+        .filter(
+            Ticket.itamtv_job_no.isnot(None),
+            Ticket.status.in_(["open", "in_progress"]),
+            User.itamtv_token.isnot(None),
+        )
+        .all()
+    )
+    for ticket, staff in rows:
+        try:
+            remote = asyncio.run(read_status(ticket.itamtv_job_no, staff.itamtv_token))
+        except Exception:  # noqa: BLE001
+            logger.exception("read itamtv status failed for %s", ticket.ticket_no)
+            continue
+        if not remote or remote == ticket.status:
+            continue
+        if _STATUS_RANK.get(remote, -1) <= _STATUS_RANK.get(ticket.status, -1):
+            continue  # itamtv ไม่ได้คืบหน้ากว่า → ไม่แตะ
+        ticket.status = remote
+        if remote == "resolved" and ticket.resolved_at is None:
+            ticket.resolved_at = datetime.now(timezone.utc)
+        db.add(TicketComment(
+            ticket_id=ticket.id, is_internal=True,
+            content=f"↩️ sync สถานะจาก itamtv: {remote}",
+        ))
+        db.commit()
 
 
 def _multipart_no_upload(fields: dict) -> tuple[bytes, str]:

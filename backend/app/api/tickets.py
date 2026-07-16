@@ -25,7 +25,7 @@ from app.schemas.ticket import (
     TicketOut,
     TicketUpdate,
 )
-from app.services import line_service, storage_service, ticket_service
+from app.services import itamtv_service, line_service, storage_service, ticket_service
 
 router = APIRouter(prefix="/api/tickets", tags=["tickets"])
 
@@ -134,6 +134,7 @@ def update_ticket(
     if data.get("status") == "resolved" and ticket.resolved_at is None:
         ticket.resolved_at = datetime.now(timezone.utc)
     prev_assignee = ticket.assigned_to
+    prev_status = ticket.status
     for key, value in data.items():
         setattr(ticket, key, value)
     db.commit()
@@ -143,7 +144,32 @@ def update_ticket(
         from app.api.webhook import notify_staff_close
 
         asyncio.run(notify_staff_close(db, ticket))
+    # สถานะเปลี่ยน → sync ไปอัปเดตเคสใน itamtv ให้ตรงกัน (best-effort)
+    if ticket.status != prev_status:
+        _sync_itamtv_status(db, ticket)
     return ticket
+
+
+def _sync_itamtv_status(db: Session, ticket: Ticket) -> None:
+    """push สถานะ ticket ปัจจุบันไปเซ็ตในเคส itamtv โดยใช้ token ของช่างที่รับผิดชอบ."""
+    target = itamtv_service.STATUS_TO_ITAMTV.get(ticket.status)
+    if not (target and ticket.itamtv_job_no and ticket.assigned_to):
+        return
+    staff = db.get(User, ticket.assigned_to)
+    if staff is None or not staff.itamtv_token:
+        return
+    try:
+        asyncio.run(itamtv_service.set_status(
+            ticket.itamtv_job_no, staff.itamtv_token, target,
+            people_code=staff.itamtv_emp_code,
+            note=f"อัปเดตสถานะจาก dashboard โดย {staff.display_name or staff.username}",
+        ))
+    except Exception as exc:  # noqa: BLE001
+        db.add(TicketComment(
+            ticket_id=ticket.id, user_id=staff.id, is_internal=True,
+            content=f"⚠️ sync สถานะไป itamtv ไม่สำเร็จ ({exc})",
+        ))
+        db.commit()
 
 
 @router.post("/{ticket_id}/notify-close", response_model=TicketOut)

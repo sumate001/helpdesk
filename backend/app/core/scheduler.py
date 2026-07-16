@@ -34,6 +34,18 @@ def _sla_job() -> None:
         db.close()
 
 
+def _itamtv_sync_job() -> None:
+    """ดึงสถานะจาก itamtv มาอัปเดต ticket (ทิศ itamtv → dashboard)."""
+    from app.core.database import SessionLocal
+    from app.services.itamtv_service import reconcile_statuses
+
+    db = SessionLocal()
+    try:
+        reconcile_statuses(db)
+    finally:
+        db.close()
+
+
 def start_scheduler() -> None:
     if scheduler.running:
         return
@@ -51,6 +63,15 @@ def start_scheduler() -> None:
         "interval",
         minutes=1,
         id="sla_check",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+    )
+    scheduler.add_job(
+        _itamtv_sync_job,
+        "interval",
+        minutes=3,
+        id="itamtv_sync",
         replace_existing=True,
         max_instances=1,
         coalesce=True,
