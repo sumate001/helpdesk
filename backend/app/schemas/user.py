@@ -30,6 +30,16 @@ class UserUpdate(BaseModel):
     itamtv_emp_code: str | None = None
 
 
+class UserSelfUpdate(BaseModel):
+    """ผู้ใช้แก้โปรไฟล์ตัวเอง — แก้ role/is_active/username ไม่ได้ (กัน self-escalate)."""
+    email: EmailStr | None = None
+    display_name: str | None = None
+    password: str | None = None
+    line_user_id: str | None = None
+    itamtv_token: str | None = None
+    itamtv_emp_code: str | None = None
+
+
 class UserOut(UserBase):
     model_config = ConfigDict(from_attributes=True)
 

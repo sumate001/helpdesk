@@ -7,11 +7,12 @@ from app.core.security import (
     create_access_token,
     create_refresh_token,
     decode_token,
+    hash_password,
     verify_password,
 )
 from app.models.user import User
 from app.schemas.auth import LoginRequest, RefreshRequest, TokenResponse
-from app.schemas.user import UserOut
+from app.schemas.user import UserOut, UserSelfUpdate
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
@@ -19,6 +20,28 @@ router = APIRouter(prefix="/api/auth", tags=["auth"])
 @router.get("/me", response_model=UserOut)
 def me(user: User = Depends(get_current_user)):
     """ข้อมูลผู้ใช้ที่ล็อกอินอยู่ (รวม role) — frontend ใช้ตัดสินเมนู/สิทธิ์."""
+    return user
+
+
+@router.patch("/me", response_model=UserOut)
+def update_me(
+    payload: UserSelfUpdate,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """ผู้ใช้แก้โปรไฟล์ตัวเอง — staff ก็ทำได้ (ไม่แตะ role/สถานะ)."""
+    data = payload.model_dump(exclude_unset=True)
+    if data.get("password"):
+        user.password_hash = hash_password(data.pop("password"))
+    else:
+        data.pop("password", None)
+    for k in ("line_user_id", "itamtv_token", "itamtv_emp_code"):
+        if k in data:
+            data[k] = data[k] or None  # ว่าง → NULL (line_user_id มี unique constraint)
+    for key, value in data.items():
+        setattr(user, key, value)
+    db.commit()
+    db.refresh(user)
     return user
 
 

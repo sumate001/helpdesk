@@ -8,6 +8,7 @@ import Reports from "./pages/Reports";
 import KnowledgeBase from "./pages/KnowledgeBase";
 import Settings from "./pages/Settings";
 import Users from "./pages/Users";
+import Profile from "./pages/Profile";
 import ServiceForm from "./pages/ServiceForm";
 
 function NavLink({ to, children }) {
@@ -43,6 +44,7 @@ function Layout({ children }) {
           {isAdmin && <NavLink to="/kb">คลังความรู้</NavLink>}
           {isAdmin && <NavLink to="/users">เจ้าหน้าที่</NavLink>}
           {isAdmin && <NavLink to="/settings">ตั้งค่า</NavLink>}
+          <NavLink to="/profile">โปรไฟล์</NavLink>
           <button
             onClick={logout}
             className="ml-auto text-sm text-slate-400 hover:text-fuchsia-300 transition-colors"
@@ -85,6 +87,7 @@ export default function App() {
       <Route path="/tickets" element={<Protected><TicketList /></Protected>} />
       <Route path="/tickets/:id" element={<Protected><TicketDetail /></Protected>} />
       <Route path="/reports" element={<Protected><Reports /></Protected>} />
+      <Route path="/profile" element={<Protected><Profile /></Protected>} />
       <Route path="/kb" element={<AdminOnly><KnowledgeBase /></AdminOnly>} />
       <Route path="/users" element={<AdminOnly><Users /></AdminOnly>} />
       <Route path="/settings" element={<AdminOnly><Settings /></AdminOnly>} />
