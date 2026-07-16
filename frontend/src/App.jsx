@@ -28,7 +28,7 @@ function NavLink({ to, children }) {
 }
 
 function Layout({ children }) {
-  const { logout } = useAuth();
+  const { logout, isAdmin } = useAuth();
   return (
     <div className="min-h-screen">
       <header className="glass sticky top-0 z-20 shadow-[0_1px_0_rgba(255,255,255,0.06)]">
@@ -39,9 +39,10 @@ function Layout({ children }) {
           <NavLink to="/">ภาพรวม</NavLink>
           <NavLink to="/tickets">Tickets</NavLink>
           <NavLink to="/reports">รายงาน</NavLink>
-          <NavLink to="/kb">คลังความรู้</NavLink>
-          <NavLink to="/users">เจ้าหน้าที่</NavLink>
-          <NavLink to="/settings">ตั้งค่า</NavLink>
+          {/* หน้าตั้งค่า/จัดการ เฉพาะ admin — staff ไม่ต้องเข้ามายุ่ง */}
+          {isAdmin && <NavLink to="/kb">คลังความรู้</NavLink>}
+          {isAdmin && <NavLink to="/users">เจ้าหน้าที่</NavLink>}
+          {isAdmin && <NavLink to="/settings">ตั้งค่า</NavLink>}
           <button
             onClick={logout}
             className="ml-auto text-sm text-slate-400 hover:text-fuchsia-300 transition-colors"
@@ -61,6 +62,20 @@ function Protected({ children }) {
   return <Layout>{children}</Layout>;
 }
 
+// หน้าเฉพาะ admin — staff ที่พยายามเข้า (พิมพ์ URL ตรง) เด้งกลับหน้าแรก
+function AdminOnly({ children }) {
+  const { isAuthenticated, isAdmin, loadingUser } = useAuth();
+  if (!isAuthenticated) return <Navigate to="/login" replace />;
+  if (loadingUser)
+    return (
+      <Layout>
+        <p className="text-slate-500">กำลังโหลด...</p>
+      </Layout>
+    );
+  if (!isAdmin) return <Navigate to="/" replace />;
+  return <Layout>{children}</Layout>;
+}
+
 export default function App() {
   return (
     <Routes>
@@ -70,9 +85,9 @@ export default function App() {
       <Route path="/tickets" element={<Protected><TicketList /></Protected>} />
       <Route path="/tickets/:id" element={<Protected><TicketDetail /></Protected>} />
       <Route path="/reports" element={<Protected><Reports /></Protected>} />
-      <Route path="/kb" element={<Protected><KnowledgeBase /></Protected>} />
-      <Route path="/users" element={<Protected><Users /></Protected>} />
-      <Route path="/settings" element={<Protected><Settings /></Protected>} />
+      <Route path="/kb" element={<AdminOnly><KnowledgeBase /></AdminOnly>} />
+      <Route path="/users" element={<AdminOnly><Users /></AdminOnly>} />
+      <Route path="/settings" element={<AdminOnly><Settings /></AdminOnly>} />
     </Routes>
   );
 }

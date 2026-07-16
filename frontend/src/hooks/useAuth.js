@@ -1,8 +1,29 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import api from "../api";
 
 export function useAuth() {
   const [token, setToken] = useState(() => localStorage.getItem("access_token"));
+  const [user, setUser] = useState(null);
+  const [loadingUser, setLoadingUser] = useState(!!token);
+
+  // โหลดข้อมูลผู้ใช้ที่ล็อกอินอยู่ (รวม role) เพื่อตัดสินเมนู/สิทธิ์ฝั่ง UI
+  useEffect(() => {
+    if (!token) {
+      setUser(null);
+      setLoadingUser(false);
+      return;
+    }
+    let active = true;
+    setLoadingUser(true);
+    api
+      .get("/auth/me")
+      .then(({ data }) => active && setUser(data))
+      .catch(() => active && setUser(null))
+      .finally(() => active && setLoadingUser(false));
+    return () => {
+      active = false;
+    };
+  }, [token]);
 
   async function login(username, password) {
     const { data } = await api.post("/auth/login", { username, password });
@@ -16,7 +37,16 @@ export function useAuth() {
     localStorage.removeItem("access_token");
     localStorage.removeItem("refresh_token");
     setToken(null);
+    setUser(null);
   }
 
-  return { token, isAuthenticated: !!token, login, logout };
+  return {
+    token,
+    isAuthenticated: !!token,
+    user,
+    isAdmin: user?.role === "admin",
+    loadingUser,
+    login,
+    logout,
+  };
 }

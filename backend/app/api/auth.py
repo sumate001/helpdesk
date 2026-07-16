@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
+from app.api.deps import get_current_user
 from app.core.database import get_db
 from app.core.security import (
     create_access_token,
@@ -10,8 +11,15 @@ from app.core.security import (
 )
 from app.models.user import User
 from app.schemas.auth import LoginRequest, RefreshRequest, TokenResponse
+from app.schemas.user import UserOut
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
+
+
+@router.get("/me", response_model=UserOut)
+def me(user: User = Depends(get_current_user)):
+    """ข้อมูลผู้ใช้ที่ล็อกอินอยู่ (รวม role) — frontend ใช้ตัดสินเมนู/สิทธิ์."""
+    return user
 
 
 @router.post("/login", response_model=TokenResponse)
