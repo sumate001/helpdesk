@@ -38,6 +38,9 @@ export function useAuth() {
     localStorage.removeItem("refresh_token");
     setToken(null);
     setUser(null);
+    // useAuth ถูกเรียกหลาย instance (state แยกกัน) — reload เต็มหน้าไป /login
+    // เพื่อล้าง state ทั้งหมดให้ชัวร์ (แนวเดียวกับที่ api.js ทำตอนเจอ 401)
+    window.location.href = "/login";
   }
 
   return {
