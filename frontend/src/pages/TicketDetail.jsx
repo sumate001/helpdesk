@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { useParams } from "react-router-dom";
-import api from "../api";
+import api, { apiError } from "../api";
 import StatusBadge from "../components/StatusBadge";
 import PriorityBadge from "../components/PriorityBadge";
 import CommentBox from "../components/CommentBox";
@@ -163,6 +163,15 @@ export default function TicketDetail() {
     load();
   }
 
+  async function notifyClose() {
+    try {
+      await api.post(`/tickets/${id}/notify-close`);
+      alert("ส่งการ์ดปิดเคสไปหาช่างทาง LINE แล้วครับ");
+    } catch (err) {
+      alert(apiError(err, "ส่งไม่สำเร็จ"));
+    }
+  }
+
   if (!ticket) return <p className="text-slate-500">กำลังโหลด...</p>;
 
   return (
@@ -201,6 +210,14 @@ export default function TicketDetail() {
               → {s}
             </button>
           ))}
+          {ticket.assigned_to && !["resolved", "closed"].includes(ticket.status) && (
+            <button
+              onClick={notifyClose}
+              className="text-sm ring-1 ring-emerald-400/40 rounded-lg px-3 py-1 text-emerald-300 hover:bg-emerald-400/10 transition-all"
+            >
+              📲 แจ้งช่างให้ปิดเคส
+            </button>
+          )}
         </div>
 
         {ticket.status === "pending_approval" && (

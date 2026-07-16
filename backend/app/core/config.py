@@ -41,6 +41,11 @@ class Settings(BaseSettings):
     # แมตช์ถูกทิ้งห่างชัด (~0.2) → กันคำสั้นๆ ที่ similarity เฟ้อทั้งกระดาน
     FORM_MATCH_MARGIN: float = 0.08
 
+    # itamtv (ระบบแจ้งซ่อมกลาง) + Amarin Employee Database — เปิดเคสคู่ขนาน/ดึงข้อมูลเครื่อง
+    ITAMTV_ENABLED: bool = True
+    ITAMTV_ADDJOB_URL: str = "http://10.7.1.17/webappl/itamtv/AddJob.aspx?okeXch0Ka3eu"
+    EMPLOYEE_DB_URL: str = "http://10.7.255.227:5100"
+
     # MinIO
     MINIO_ENDPOINT: str = "minio:9000"
     MINIO_ACCESS_KEY: str = "minioadmin"

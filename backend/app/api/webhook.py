@@ -9,11 +9,14 @@ from app.core.database import get_db
 from app.models.conversation import Conversation
 from app.models.line_user import LineUser
 from app.models.ticket import Ticket
+from app.models.ticket_comment import TicketComment
+from app.models.user import User
 from app.services import (
     ai_service,
     bot_message_service,
     conversation_service,
     followup_service,
+    itamtv_service,
     line_service,
     rag_service,
     storage_service,
@@ -108,6 +111,10 @@ async def _handle_event(db: Session, event: dict) -> None:
         db.commit()
         return
 
+    if etype == "postback" and line_user_id:
+        await _handle_postback(db, line_user_id, event)
+        return
+
     if etype != "message" or not line_user_id:
         return
 
@@ -131,6 +138,95 @@ async def _handle_event(db: Session, event: dict) -> None:
             await _handle_group_text(db, source_id, line_user_id, message, reply_token)
         elif mtype == "image":
             await _handle_group_image(db, source_id, line_user_id, message, reply_token)
+
+
+# --------------------------------------------------------------------------
+# Postback (ปุ่มปิดเคสจากช่าง)
+# --------------------------------------------------------------------------
+
+def _parse_postback(data: str) -> dict:
+    """แปลง 'action=close_case&ticket_id=12' → {'action':..., 'ticket_id':...}."""
+    out: dict[str, str] = {}
+    for part in (data or "").split("&"):
+        if "=" in part:
+            k, v = part.split("=", 1)
+            out[k] = v
+    return out
+
+
+async def _handle_postback(db: Session, line_user_id: str, event: dict) -> None:
+    """ช่างกดปุ่มปิดเคสจาก LINE → ตรวจสิทธิ์ → ปิด ticket + ปิดเคสใน itamtv."""
+    data = _parse_postback((event.get("postback") or {}).get("data", ""))
+    reply_token = event.get("replyToken")
+    if data.get("action") != "close_case":
+        return
+
+    # ยืนยันตัวตน: คนกดต้องเป็น IT staff ที่ผูก LINE ไว้ (users.line_user_id)
+    staff = (
+        db.query(User)
+        .filter(User.line_user_id == line_user_id, User.is_active.is_(True))
+        .one_or_none()
+    )
+    if staff is None:
+        await _reply(db, reply_token, "ขออภัยครับ ปุ่มนี้สำหรับเจ้าหน้าที่ IT ที่ลงทะเบียนไว้เท่านั้น")
+        return
+
+    ticket = db.query(Ticket).filter(Ticket.id == int(data.get("ticket_id", 0))).one_or_none()
+    if ticket is None:
+        await _reply(db, reply_token, "ไม่พบ Ticket นี้ในระบบครับ")
+        return
+    if ticket.status in ("resolved", "closed"):
+        await _reply(db, reply_token, f"เคส {ticket.ticket_no} ถูกปิดไปแล้วครับ ✅")
+        return
+
+    # ปิดฝั่ง dashboard ก่อนเสมอ (แหล่งความจริงหลักของเรา)
+    ticket.status = "resolved"
+    ticket.resolved_at = datetime.now(timezone.utc)
+    if ticket.assigned_to is None:
+        ticket.assigned_to = staff.id
+    db.add(TicketComment(ticket_id=ticket.id, user_id=staff.id,
+                         content=f"ปิดเคสผ่าน LINE โดย {staff.display_name or staff.username}",
+                         is_internal=True))
+    db.commit()
+
+    # ปิดคู่ขนานใน itamtv ด้วยสิทธิ์ช่างคนที่กดปุ่ม (token + emp code ของเขา)
+    itamtv_note = ""
+    if ticket.itamtv_job_no:
+        try:
+            if not staff.itamtv_token:
+                raise RuntimeError("บัญชีช่างยังไม่ได้ผูก itamtv token (ตั้งในหน้า Users)")
+            msg = await itamtv_service.complete_case(
+                ticket.itamtv_job_no,
+                token=staff.itamtv_token,
+                people_code=staff.itamtv_emp_code,
+                note=f"ปิดโดย {staff.display_name or staff.username} ผ่าน LINE",
+            )
+            itamtv_note = f"\nitamtv: {msg}"
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("itamtv complete failed for %s: %s", ticket.ticket_no, exc)
+            db.add(TicketComment(
+                ticket_id=ticket.id, user_id=staff.id, is_internal=True,
+                content=f"⚠️ ปิดใน itamtv อัตโนมัติไม่ได้ ({exc}) — รบกวนปิดในระบบเองด้วยครับ",
+            ))
+            db.commit()
+            itamtv_note = "\n(⚠️ ปิดใน itamtv อัตโนมัติไม่ได้ รบกวนปิดในระบบเองด้วยครับ)"
+
+    await _reply(db, reply_token, f"ปิดเคส {ticket.ticket_no} เรียบร้อยครับ ✅{itamtv_note}")
+
+
+async def notify_staff_close(db: Session, ticket: Ticket) -> bool:
+    """ส่งการ์ดปุ่มปิดเคสไปหาช่างที่รับผิดชอบ ticket นี้ — คืน False ถ้ายังผูก LINE ไม่ได้."""
+    if ticket.assigned_to is None:
+        return False
+    staff = db.query(User).filter(User.id == ticket.assigned_to).one_or_none()
+    if staff is None or not staff.line_user_id:
+        logger.info("assignee ของ %s ยังไม่ผูก LINE — ข้ามการส่งปุ่มปิดเคส", ticket.ticket_no)
+        return False
+    flex = line_service.close_case_flex(
+        ticket.ticket_no, ticket.id, ticket.title or ticket.description or "-"
+    )
+    await line_service.push_flex(staff.line_user_id, flex)
+    return True
 
 
 # --------------------------------------------------------------------------
@@ -361,6 +457,9 @@ async def _run_intake(
 
     db.refresh(ticket)
     await _notify_group(db, ticket_service.group_notify_text(ticket))
+    if not is_approval:
+        # เคสซ่อม/แก้ไข → เปิดคู่ขนานใน itamtv + แนบข้อมูลเครื่องผู้แจ้ง (best-effort)
+        await itamtv_service.mirror_ticket(db, ticket, lu)
     if is_approval:
         tail = "ทีม IT กำลังพิจารณาอนุมัติให้นะครับ 🙏"
     else:

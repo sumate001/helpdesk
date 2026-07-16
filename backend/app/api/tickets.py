@@ -133,10 +133,36 @@ def update_ticket(
     data = payload.model_dump(exclude_unset=True)
     if data.get("status") == "resolved" and ticket.resolved_at is None:
         ticket.resolved_at = datetime.now(timezone.utc)
+    prev_assignee = ticket.assigned_to
     for key, value in data.items():
         setattr(ticket, key, value)
     db.commit()
     db.refresh(ticket)
+    # เพิ่งมอบหมายให้ช่างคนใหม่ → ส่งการ์ดปุ่มปิดเคสไปหาช่างทาง LINE
+    if ticket.assigned_to and ticket.assigned_to != prev_assignee:
+        from app.api.webhook import notify_staff_close
+
+        asyncio.run(notify_staff_close(db, ticket))
+    return ticket
+
+
+@router.post("/{ticket_id}/notify-close", response_model=TicketOut)
+def notify_close(
+    ticket_id: int,
+    db: Session = Depends(get_db),
+    _: User = Depends(get_current_user),
+):
+    """ส่งการ์ดปุ่มปิดเคสไปหาช่างที่รับผิดชอบ (ปุ่มสั่งเองบน dashboard)."""
+    from app.api.webhook import notify_staff_close
+
+    ticket = db.get(Ticket, ticket_id)
+    if ticket is None:
+        raise HTTPException(status_code=404, detail="ไม่พบ ticket")
+    if not asyncio.run(notify_staff_close(db, ticket)):
+        raise HTTPException(
+            status_code=400,
+            detail="ยังส่งไม่ได้ — ต้องมีช่างที่ถูกมอบหมาย (assigned) และผูก LINE userId ในหน้า Users ก่อน",
+        )
     return ticket
 
 

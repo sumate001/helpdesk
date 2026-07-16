@@ -18,7 +18,7 @@ from app.models.conversation import Conversation
 from app.models.line_user import LineUser
 from app.models.ticket_attachment import TicketAttachment
 from app.models.ticket_followup import TicketFollowup
-from app.services import line_service, settings_service, ticket_service
+from app.services import itamtv_service, line_service, settings_service, ticket_service
 
 logger = logging.getLogger(__name__)
 
@@ -175,4 +175,5 @@ def _process_escalations(db: Session) -> None:
         )
         asyncio.run(line_service.push(_push_target(conv), escalate_text))
         asyncio.run(line_service.notify_group(ticket_service.group_notify_text(ticket)))
+        asyncio.run(itamtv_service.mirror_ticket(db, ticket, lu))
         logger.info("escalated conversation %s → ticket %s", conv.id, ticket.ticket_no)

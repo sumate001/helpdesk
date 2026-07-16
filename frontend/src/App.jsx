@@ -7,6 +7,7 @@ import TicketDetail from "./pages/TicketDetail";
 import Reports from "./pages/Reports";
 import KnowledgeBase from "./pages/KnowledgeBase";
 import Settings from "./pages/Settings";
+import Users from "./pages/Users";
 import ServiceForm from "./pages/ServiceForm";
 
 function NavLink({ to, children }) {
@@ -39,6 +40,7 @@ function Layout({ children }) {
           <NavLink to="/tickets">Tickets</NavLink>
           <NavLink to="/reports">รายงาน</NavLink>
           <NavLink to="/kb">คลังความรู้</NavLink>
+          <NavLink to="/users">เจ้าหน้าที่</NavLink>
           <NavLink to="/settings">ตั้งค่า</NavLink>
           <button
             onClick={logout}
@@ -69,6 +71,7 @@ export default function App() {
       <Route path="/tickets/:id" element={<Protected><TicketDetail /></Protected>} />
       <Route path="/reports" element={<Protected><Reports /></Protected>} />
       <Route path="/kb" element={<Protected><KnowledgeBase /></Protected>} />
+      <Route path="/users" element={<Protected><Users /></Protected>} />
       <Route path="/settings" element={<Protected><Settings /></Protected>} />
     </Routes>
   );

@@ -129,6 +129,50 @@ async def push(to: str, text: str, with_quick_reply: bool = False) -> list[str]:
     return await _post("/message/push", payload)
 
 
+def close_case_flex(ticket_no: str, ticket_id: int, summary: str) -> dict:
+    """Flex bubble แจ้งช่างพร้อมปุ่ม 'ปิดเคส ✅' (postback) — กดแล้วบอทไปปิดเคสให้.
+
+    postback.data พก action+ticket_id เพื่อให้ webhook รู้ว่าจะปิด ticket ไหน.
+    """
+    return {
+        "type": "flex",
+        "altText": f"เคส {ticket_no} รอปิดงาน",
+        "contents": {
+            "type": "bubble",
+            "body": {
+                "type": "box",
+                "layout": "vertical",
+                "spacing": "sm",
+                "contents": [
+                    {"type": "text", "text": f"🎫 {ticket_no}", "weight": "bold", "size": "lg"},
+                    {"type": "text", "text": summary, "size": "sm", "wrap": True, "color": "#555555"},
+                ],
+            },
+            "footer": {
+                "type": "box",
+                "layout": "vertical",
+                "contents": [
+                    {
+                        "type": "button",
+                        "style": "primary",
+                        "color": "#22c55e",
+                        "action": {
+                            "type": "postback",
+                            "label": "ปิดเคส ✅",
+                            "data": f"action=close_case&ticket_id={ticket_id}",
+                            "displayText": f"ปิดเคส {ticket_no}",
+                        },
+                    }
+                ],
+            },
+        },
+    }
+
+
+async def push_flex(to: str, flex: dict) -> list[str]:
+    return await _post("/message/push", {"to": to, "messages": [flex]})
+
+
 async def notify_group(text: str) -> list[str]:
     if not settings.LINE_GROUP_IT_ID:
         logger.info("LINE_GROUP_IT_ID not set, skip group notify")

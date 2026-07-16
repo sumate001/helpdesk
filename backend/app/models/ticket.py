@@ -20,6 +20,8 @@ class Ticket(Base):
     status: Mapped[str] = mapped_column(String(30), default="open")
     assigned_to: Mapped[int | None] = mapped_column(ForeignKey("users.id"))
     ai_response: Mapped[str | None] = mapped_column(Text)
+    # เลขเคสในระบบ itamtv ที่เปิดคู่ขนานไว้ — ใช้สั่งปิด/อัปเดตสถานะทีหลัง
+    itamtv_job_no: Mapped[str | None] = mapped_column(String(30))
     sla_policy_id: Mapped[int | None] = mapped_column(ForeignKey("sla_policies.id"))
     sla_response_due_at: Mapped[datetime | None] = mapped_column(DateTime)
     sla_resolve_due_at: Mapped[datetime | None] = mapped_column(DateTime)

@@ -34,6 +34,9 @@ def create_user(
         email=payload.email,
         display_name=payload.display_name,
         role=payload.role,
+        line_user_id=payload.line_user_id or None,
+        itamtv_token=payload.itamtv_token or None,
+        itamtv_emp_code=payload.itamtv_emp_code or None,
         password_hash=hash_password(payload.password),
     )
     db.add(user)
@@ -57,6 +60,9 @@ def update_user(
         user.password_hash = hash_password(data.pop("password"))
     else:
         data.pop("password", None)
+    for k in ("line_user_id", "itamtv_token", "itamtv_emp_code"):
+        if k in data:
+            data[k] = data[k] or None  # ว่าง → NULL (line_user_id มี unique constraint)
     for key, value in data.items():
         setattr(user, key, value)
     db.commit()
