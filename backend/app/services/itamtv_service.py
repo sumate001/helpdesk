@@ -36,6 +36,26 @@ _HIDDEN_FIELDS = ("__VIEWSTATE", "__VIEWSTATEGENERATOR", "__EVENTVALIDATION")
 # Employee DB (Amarin Employee Database)
 # ---------------------------------------------------------------------------
 
+async def lookup_employee_exact(
+    *, emp_code: str | None = None, email: str | None = None
+) -> dict | None:
+    """exact lookup ราย emp_code หรือ email (ยิงสดทุกครั้ง ไม่ cache) — dict หรือ None."""
+    base = get_settings().EMPLOYEE_DB_URL
+    if not base:
+        return None
+    if emp_code:
+        params = {"emp_code": emp_code.strip()}
+    elif email:
+        params = {"email": email.strip()}
+    else:
+        return None
+    async with httpx.AsyncClient(timeout=10) as client:
+        resp = await client.get(f"{base}/api/employees/lookup", params=params)
+        resp.raise_for_status()
+        data = resp.json()
+    return data.get("employee") if data.get("found") else None
+
+
 async def lookup_employee(full_name: str) -> dict | None:
     """หา record พนักงานจากชื่อ — คืน dict (มี emp_code/department/phone/id) หรือ None."""
     base = get_settings().EMPLOYEE_DB_URL
@@ -473,11 +493,15 @@ async def mirror_ticket(db: Session, ticket: Ticket, lu: LineUser | None) -> Non
     """
     if not get_settings().ITAMTV_ENABLED:
         return
-    full_name = (lu.display_name if lu else "") or ""
+    full_name = ((lu.emp_name if lu else None) or (lu.display_name if lu else "")) or ""
 
+    # ผูกพนักงานไว้แล้ว → exact lookup สด (ได้ phone/department ล่าสุด) ก่อน fallback ค้นชื่อ
     emp = None
     try:
-        emp = await lookup_employee(full_name)
+        if lu and (lu.emp_code or lu.emp_email):
+            emp = await lookup_employee_exact(emp_code=lu.emp_code, email=lu.emp_email)
+        if emp is None and full_name:
+            emp = await lookup_employee(full_name)
     except Exception:  # noqa: BLE001
         logger.exception("employee lookup failed for %s", full_name)
 
@@ -501,7 +525,7 @@ async def mirror_ticket(db: Session, ticket: Ticket, lu: LineUser | None) -> Non
     try:
         msg = await _submit_case(
             emp_code=(emp or {}).get("emp_code"),
-            full_name=full_name,
+            full_name=(emp or {}).get("name") or full_name,
             department=(emp or {}).get("department") or (lu.department if lu else None),
             category=ticket.category,
             location=location,

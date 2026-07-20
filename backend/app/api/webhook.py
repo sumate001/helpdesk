@@ -1,5 +1,6 @@
 """Line Messaging API webhook — multi-turn intake: แก้ปัญหาเบื้องต้น/เก็บข้อมูล แล้วยืนยันก่อนเปิด ticket."""
 import logging
+import re
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
@@ -30,6 +31,15 @@ RESOLVED_TEXT = "แก้ได้แล้ว ✅"
 NOT_RESOLVED_TEXT = "ยังไม่ได้ ❌"
 APPROVAL_CATEGORIES = ("equipment_request", "service_request")
 IMAGE_PLACEHOLDER = "[ผู้ใช้ส่งรูปภาพ]"
+
+# ลงทะเบียนผูกพนักงาน: ข้อความที่หน้าตาเป็นรหัสพนักงาน/อีเมล → ยิง Employee DB /lookup สด
+EMP_CODE_RE = re.compile(r"^(?=.*\d)[A-Za-z0-9-]{4,10}$")  # ต้องมีตัวเลข กันชนคำทั่วไป
+EMAIL_RE = re.compile(r"^[\w.+-]+@[\w-]+\.[\w.-]+$")
+REGISTER_PROMPT = (
+    "สวัสดีครับ 👋 ผมเป็นผู้ช่วย IT Support ของ Amarin\n"
+    "รบกวนพิมพ์ \"รหัสพนักงาน\" (หรืออีเมลบริษัท) เพื่อลงทะเบียนก่อนนะครับ\n"
+    "จะได้ไม่ต้องถามข้อมูลซ้ำทุกครั้งที่แจ้งปัญหาครับ 🙏"
+)
 
 
 @router.post("/line")
@@ -107,8 +117,10 @@ async def _handle_event(db: Session, event: dict) -> None:
 
     if etype == "follow" and line_user_id:
         profile = await line_service.get_profile(line_user_id)
-        ticket_service.upsert_line_user(db, line_user_id, profile)
+        lu = ticket_service.upsert_line_user(db, line_user_id, profile)
         db.commit()
+        if lu.employee_id is None and event.get("replyToken"):
+            await _reply(db, event["replyToken"], REGISTER_PROMPT)
         return
 
     if etype == "postback" and line_user_id:
@@ -344,12 +356,61 @@ def _update_user_info(db: Session, lu: LineUser, result: dict) -> None:
 
 
 def _known_info(lu: LineUser) -> dict:
-    """ข้อมูลผู้ใช้ที่มีอยู่แล้ว → ส่งให้ AI ไม่ถามซ้ำ."""
+    """ข้อมูลผู้ใช้ที่มีอยู่แล้ว → ส่งให้ AI ไม่ถามซ้ำ.
+
+    ชื่อเอาจาก Employee DB ก่อน (ผูกตอนลงทะเบียน) — display_name โดน LINE profile
+    เขียนทับได้ตลอด เชื่อไม่ได้ว่าเป็นชื่อจริง."""
     return {
-        "full_name": lu.display_name,
+        "full_name": lu.emp_name or lu.display_name,
         "building": lu.building,
         "floor": lu.floor,
     }
+
+
+async def _try_register(db: Session, lu: LineUser, text: str, reply_token: str) -> bool:
+    """ข้อความหน้าตาเป็นรหัสพนักงาน/อีเมล → ผูกกับ Employee DB ผ่าน /lookup (ยิงสด ไม่ cache).
+
+    คืน True = จัดการข้อความนี้จบแล้ว (ไม่ต้องเข้า intake), False = ไม่ใช่การลงทะเบียน.
+    """
+    key = text.strip()
+    if EMAIL_RE.match(key):
+        kwargs = {"email": key}
+    elif EMP_CODE_RE.match(key):
+        kwargs = {"emp_code": key}
+    else:
+        return False
+
+    try:
+        emp = await itamtv_service.lookup_employee_exact(**kwargs)
+    except Exception:  # noqa: BLE001
+        logger.exception("employee exact lookup failed for %s", key)
+        await _reply(db, reply_token,
+                     "ขออภัยครับ ระบบทะเบียนพนักงานติดขัดชั่วคราว ลองใหม่อีกครั้งนะครับ 🙏")
+        return True
+    if emp is None:
+        await _reply(db, reply_token,
+                     f"ไม่พบ \"{key}\" ในทะเบียนพนักงานครับ 😢\n"
+                     "ลองตรวจรหัสพนักงานอีกครั้ง หรือพิมพ์อีเมลบริษัทแทนได้ครับ")
+        return True
+
+    lu.employee_id = emp["id"]
+    lu.emp_code = emp.get("emp_code") or lu.emp_code
+    lu.emp_email = emp.get("email") or lu.emp_email
+    lu.emp_name = (emp.get("name") or "")[:100] or lu.emp_name
+    lu.department = (emp.get("department") or lu.department or "")[:100] or None
+    if emp.get("position"):
+        lu.position = str(emp["position"])[:100]
+    if emp.get("building"):
+        lu.building = str(emp["building"])[:100]
+    if emp.get("floor"):
+        lu.floor = str(emp["floor"])[:20]
+    db.commit()
+    dept = f" ({emp['department']})" if emp.get("department") else ""
+    await _reply(db, reply_token,
+                 f"ลงทะเบียนเรียบร้อยครับ ✅\nคุณ{emp['name']}{dept}\n"
+                 "มีปัญหา IT แจ้งเข้ามาได้เลยนะครับ 🙌\n"
+                 "(ถ้าข้อมูลไม่ถูกต้อง พิมพ์รหัสพนักงาน/อีเมลใหม่ได้เลยครับ)")
+    return True
 
 
 def _create_ticket_from_intake(
@@ -497,6 +558,10 @@ async def _handle_user_text(
     db.commit()
 
     conv = conversation_service.get_active(db, "user", None, line_user_id)
+
+    # นอกบทสนทนา + ข้อความหน้าตาเป็นรหัสพนักงาน/อีเมล → ลงทะเบียน/แก้การผูกพนักงาน
+    if conv is None and await _try_register(db, lu, text, reply_token):
+        return
 
     # ไม่มีบทสนทนา + เป็นปุ่ม follow-up เดิม → จัดการแบบเดิม (ticket ที่เปิดค้างไว้)
     if conv is None and text.strip() in (RESOLVED_TEXT, NOT_RESOLVED_TEXT):

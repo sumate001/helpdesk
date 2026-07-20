@@ -152,6 +152,10 @@ id              SERIAL PRIMARY KEY
 line_user_id    VARCHAR(100) UNIQUE NOT NULL
 display_name    VARCHAR(100)
 picture_url     TEXT
+employee_id     INTEGER       -- id ใน Amarin Employee DB (migration 0011)
+emp_code        VARCHAR(20)   -- key ที่ใช้ lookup — ยิง /api/employees/lookup สดทุกครั้ง ไม่ cache
+emp_email       VARCHAR(100)
+emp_name        VARCHAR(100)  -- ชื่อจริงจาก Employee DB (display_name โดน LINE profile ทับได้)
 department      VARCHAR(100)
 position        VARCHAR(100)
 building        VARCHAR(100)
@@ -334,6 +338,20 @@ TK-YYYYMMDD-XXXX
 ตัวอย่าง: TK-20240615-0001
 ```
 
+### Registration Flow (ผูก LINE user เข้ากับ Employee DB — 1-1 เท่านั้น)
+
+Employee DB (`EMPLOYEE_DB_URL` = http://10.7.255.227:5100) มี exact lookup แล้ว
+(`GET /api/employees/lookup?emp_code=...|email=...` — ดู `docs/employee-api-spec.md`)
+ฝั่งเรา **ไม่ cache** — ยิง lookup สดทุกครั้งที่ต้องใช้:
+
+- `follow` event + ยังไม่ผูก (`employee_id` NULL) → ทักให้พิมพ์รหัสพนักงาน/อีเมล
+- ข้อความ 1-1 นอกบทสนทนา ที่หน้าตาเป็นรหัส (มีตัวเลข, 4-10 ตัว) หรืออีเมล →
+  `_try_register`: lookup → ผูก `employee_id/emp_code/emp_email/emp_name` + เติม
+  department/position (+building/floor ถ้ามี) ลง `line_users` — พิมพ์รหัสใหม่ = rebind ได้
+- `_known_info` ใช้ `emp_name` ก่อน `display_name` → AI ไม่ถามชื่อซ้ำ
+- `mirror_ticket` ใช้ exact lookup จาก key ที่ผูกไว้ก่อน (ได้ phone/department สด)
+  แล้วค่อย fallback ค้นชื่อ `?q=`
+
 ### Intake Flow (multi-turn — ใช้ทั้ง 1-1 และกลุ่ม)
 
 บอท **ไม่เปิด ticket จากข้อความเดียวทันที** แต่คุยเก็บข้อมูล/แก้ปัญหาก่อน ผ่าน `conversations`
@@ -423,7 +441,8 @@ DELETE /api/kb/{id}       # ลบ chunk
 ### Settings (Runtime AI config — Admin only)
 ```
 GET   /api/settings                # ค่า effective ปัจจุบัน (+ EMBED_DIM read-only + list override)
-PATCH /api/settings                # แก้ OLLAMA_MODEL/EMBED_MODEL/BASE_URL/RAG_TOP_K/MIN_SIMILARITY/FOLLOWUP_ENABLED
+PATCH /api/settings                # แก้ OLLAMA_MODEL/EMBED_MODEL/BASE_URL/RAG_TOP_K/MIN_SIMILARITY/FOLLOWUP_ENABLED/TICKET_CONFIRM_REQUIRED
+                                   #   TICKET_CONFIRM_REQUIRED: ต้องกดยืนยันก่อนเปิด ticket ไหม (ปิด = เปิดเคสทันทีเมื่อข้อมูลครบ)
                                    #   ส่งค่าว่าง/null = ล้าง override กลับไปใช้ค่า .env
 GET   /api/settings/ollama-models  # รายชื่อ model ที่ pull ไว้บนเครื่อง Ollama (/api/tags)
 ```
@@ -684,7 +703,8 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "2"]
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
+# ต้อง 1 worker เท่านั้น — APScheduler รันใน lifespan ของทุก worker ถ้า >1 จะส่ง follow-up/เปิด ticket ซ้ำ
 ```
 
 ### Dockerfile — Frontend Dev (`frontend/Dockerfile.dev`)
