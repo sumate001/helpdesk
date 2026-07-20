@@ -20,6 +20,7 @@ from app.services import (
     itamtv_service,
     line_service,
     rag_service,
+    settings_service,
     storage_service,
     ticket_service,
 )
@@ -119,7 +120,11 @@ async def _handle_event(db: Session, event: dict) -> None:
         profile = await line_service.get_profile(line_user_id)
         lu = ticket_service.upsert_line_user(db, line_user_id, profile)
         db.commit()
-        if lu.employee_id is None and event.get("replyToken"):
+        if (
+            settings_service.get("EMPLOYEE_LOOKUP_ENABLED")
+            and lu.employee_id is None
+            and event.get("replyToken")
+        ):
             await _reply(db, event["replyToken"], REGISTER_PROMPT)
         return
 
@@ -372,6 +377,8 @@ async def _try_register(db: Session, lu: LineUser, text: str, reply_token: str) 
 
     คืน True = จัดการข้อความนี้จบแล้ว (ไม่ต้องเข้า intake), False = ไม่ใช่การลงทะเบียน.
     """
+    if not settings_service.get("EMPLOYEE_LOOKUP_ENABLED"):
+        return False
     key = text.strip()
     if EMAIL_RE.match(key):
         kwargs = {"email": key}

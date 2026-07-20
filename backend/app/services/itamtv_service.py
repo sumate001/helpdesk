@@ -21,6 +21,7 @@ from app.models.line_user import LineUser
 from app.models.ticket import Ticket
 from app.models.ticket_comment import TicketComment
 from app.models.user import User
+from app.services import settings_service
 
 logger = logging.getLogger(__name__)
 
@@ -430,7 +431,7 @@ def reconcile_statuses(db) -> None:
     เฉพาะ ticket ที่ยังไม่จบ (open/in_progress), มี itamtv_job_no และช่างที่รับผิดชอบ
     ผูก token ไว้. อัปเดตเฉพาะเมื่อ itamtv "คืบหน้ากว่า" (กันเขียนทับย้อนหลัง).
     """
-    if not get_settings().ITAMTV_ENABLED:
+    if not settings_service.get("ITAMTV_ENABLED"):
         return
     from datetime import datetime, timezone
 
@@ -491,19 +492,20 @@ async def mirror_ticket(db: Session, ticket: Ticket, lu: LineUser | None) -> Non
 
     best-effort ทั้งฟังก์ชัน — error ใดๆ log + บันทึกไว้ใน comment แล้วจบ.
     """
-    if not get_settings().ITAMTV_ENABLED:
+    if not settings_service.get("ITAMTV_ENABLED"):
         return
     full_name = ((lu.emp_name if lu else None) or (lu.display_name if lu else "")) or ""
 
     # ผูกพนักงานไว้แล้ว → exact lookup สด (ได้ phone/department ล่าสุด) ก่อน fallback ค้นชื่อ
     emp = None
-    try:
-        if lu and (lu.emp_code or lu.emp_email):
-            emp = await lookup_employee_exact(emp_code=lu.emp_code, email=lu.emp_email)
-        if emp is None and full_name:
-            emp = await lookup_employee(full_name)
-    except Exception:  # noqa: BLE001
-        logger.exception("employee lookup failed for %s", full_name)
+    if settings_service.get("EMPLOYEE_LOOKUP_ENABLED"):
+        try:
+            if lu and (lu.emp_code or lu.emp_email):
+                emp = await lookup_employee_exact(emp_code=lu.emp_code, email=lu.emp_email)
+            if emp is None and full_name:
+                emp = await lookup_employee(full_name)
+        except Exception:  # noqa: BLE001
+            logger.exception("employee lookup failed for %s", full_name)
 
     # ข้อมูลเครื่องที่ถือครอง → internal comment ให้ช่างเตรียมตัว
     if emp:

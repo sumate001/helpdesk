@@ -441,10 +441,12 @@ DELETE /api/kb/{id}       # ลบ chunk
 ### Settings (Runtime AI config — Admin only)
 ```
 GET   /api/settings                # ค่า effective ปัจจุบัน (+ EMBED_DIM read-only + list override)
-PATCH /api/settings                # แก้ OLLAMA_MODEL/EMBED_MODEL/BASE_URL/RAG_TOP_K/MIN_SIMILARITY/FOLLOWUP_ENABLED/TICKET_CONFIRM_REQUIRED
+PATCH /api/settings                # แก้ OLLAMA_MODEL/EMBED_MODEL/BASE_URL/RAG_TOP_K/MIN_SIMILARITY/FOLLOWUP_ENABLED/TICKET_CONFIRM_REQUIRED/ITAMTV_ENABLED/EMPLOYEE_LOOKUP_ENABLED
                                    #   TICKET_CONFIRM_REQUIRED: ต้องกดยืนยันก่อนเปิด ticket ไหม (ปิด = เปิดเคสทันทีเมื่อข้อมูลครบ)
                                    #   ส่งค่าว่าง/null = ล้าง override กลับไปใช้ค่า .env
 GET   /api/settings/ollama-models  # รายชื่อ model ที่ pull ไว้บนเครื่อง Ollama (/api/tags)
+GET   /api/settings/integrations   # ระบบภายนอก (itamtv / Employee DB): สวิตช์ + ping สถานะสด
+                                   #   สวิตช์ = ITAMTV_ENABLED / EMPLOYEE_LOOKUP_ENABLED (toggle ผ่าน PATCH ปกติ)
 ```
 override เก็บใน DB (`app_settings`) → โหลดเข้า in-memory cache ตอน start +
 อัปเดต cache ทุกครั้งที่ PATCH. `ai_service`/`rag_service` อ่านค่าผ่าน

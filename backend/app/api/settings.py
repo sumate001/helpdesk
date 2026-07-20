@@ -13,6 +13,8 @@ from app.core.config import settings as env_settings
 from app.core.database import get_db
 from app.models.user import User
 from app.schemas.settings import (
+    IntegrationOut,
+    IntegrationsOut,
     OllamaModelsOut,
     SettingsOut,
     SettingsUpdate,
@@ -50,6 +52,44 @@ def update_settings(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     return _current()
+
+
+async def _probe(client: httpx.AsyncClient, url: str) -> tuple[bool, str]:
+    """GET หนึ่งครั้งดูว่าปลายทางตอบไหม — (reachable, ข้อความสั้นๆ)."""
+    try:
+        resp = await client.get(url)
+        if resp.status_code < 500:
+            return True, f"ตอบ HTTP {resp.status_code}"
+        return False, f"ปลายทาง error (HTTP {resp.status_code})"
+    except httpx.HTTPError as exc:
+        return False, f"เชื่อมต่อไม่ได้: {type(exc).__name__}"
+
+
+@router.get("/integrations", response_model=IntegrationsOut)
+async def list_integrations(_: User = Depends(require_admin)):
+    """ระบบภายนอกที่เชื่อมต่อ + สถานะสดๆ — สวิตช์เปิด/ปิดแก้ผ่าน PATCH /api/settings."""
+    specs = [
+        {
+            "key": "ITAMTV_ENABLED",
+            "name": "itamtv (ระบบแจ้งซ่อมกลาง)",
+            "description": "เปิดเคสคู่ขนาน + sync สถานะเคสสองทาง",
+            "url": env_settings.ITAMTV_ADDJOB_URL,
+        },
+        {
+            "key": "EMPLOYEE_LOOKUP_ENABLED",
+            "name": "Amarin Employee Database",
+            "description": "ลงทะเบียนผูกผู้ใช้ LINE + ดึงข้อมูลพนักงาน/เครื่องที่ถือครอง",
+            "url": env_settings.EMPLOYEE_DB_URL,
+        },
+    ]
+    out: list[IntegrationOut] = []
+    async with httpx.AsyncClient(timeout=5) as client:
+        results = await asyncio.gather(*(_probe(client, s["url"]) for s in specs))
+    for spec, (reachable, detail) in zip(specs, results):
+        enabled = bool(settings_service.get(spec["key"]))
+        spec["url"] = spec["url"].split("?")[0]  # ไม่โชว์ token ใน query ให้หน้า UI
+        out.append(IntegrationOut(**spec, enabled=enabled, reachable=reachable, detail=detail))
+    return IntegrationsOut(integrations=out)
 
 
 @router.get("/ollama-models", response_model=OllamaModelsOut)

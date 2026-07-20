@@ -41,6 +41,36 @@ export default function Settings() {
   const [saving, setSaving] = useState(false);
   const [msg, setMsg] = useState(null);
 
+  // ระบบภายนอกที่เชื่อมต่อ (itamtv / Employee DB) + สถานะสด
+  const [integrations, setIntegrations] = useState(null);
+  const [togglingKey, setTogglingKey] = useState(null);
+
+  const loadIntegrations = () =>
+    api
+      .get("/settings/integrations")
+      .then(({ data }) => setIntegrations(data.integrations))
+      .catch(() => setIntegrations([]));
+
+  // สวิตช์เปิด/ปิดระบบ — บันทึกทันที ไม่ต้องกดปุ่มบันทึกของฟอร์ม
+  const toggleIntegration = async (item) => {
+    setTogglingKey(item.key);
+    try {
+      const { data } = await api.patch("/settings", { [item.key]: !item.enabled });
+      setData(data);
+      setIntegrations((list) =>
+        list.map((x) => (x.key === item.key ? { ...x, enabled: !item.enabled } : x))
+      );
+      setMsg({
+        type: "ok",
+        text: `${!item.enabled ? "เปิด" : "ปิด"}การเชื่อมต่อ ${item.name} แล้ว — มีผลทันที`,
+      });
+    } catch (err) {
+      setMsg({ type: "err", text: apiError(err, "บันทึกไม่สำเร็จ") });
+    } finally {
+      setTogglingKey(null);
+    }
+  };
+
   // เชื่อมต่อ Ollama ด้วย base_url ที่พิมพ์อยู่ (ยังไม่ save) แล้วโหลด model
   const testConnection = async () => {
     setConn({ status: "checking", text: "กำลังเชื่อมต่อ..." });
@@ -72,6 +102,7 @@ export default function Settings() {
       f.FOLLOWUP_ENABLED = data.FOLLOWUP_ENABLED;
       f.TICKET_CONFIRM_REQUIRED = data.TICKET_CONFIRM_REQUIRED;
       setForm(f);
+      loadIntegrations();
       // auto-connect ด้วยค่าที่บันทึกไว้
       setConn({ status: "checking", text: "กำลังเชื่อมต่อ..." });
       api
@@ -160,6 +191,67 @@ export default function Settings() {
           {msg.text}
         </div>
       )}
+
+      {/* ระบบที่เชื่อมต่อ — สวิตช์บันทึกทันที */}
+      <div className="glass rounded-xl p-5 space-y-4">
+        <div>
+          <h2 className="font-semibold text-slate-100">ระบบที่เชื่อมต่อ</h2>
+          <p className="text-xs text-slate-500 mt-0.5">
+            ระบบภายนอกที่บอทเรียกใช้ — ปิดสวิตช์เพื่อหยุดเรียกชั่วคราว (มีผลทันที)
+          </p>
+        </div>
+        {integrations === null ? (
+          <p className="text-sm text-slate-500">กำลังตรวจสอบการเชื่อมต่อ...</p>
+        ) : integrations.length === 0 ? (
+          <p className="text-sm text-red-400">โหลดสถานะการเชื่อมต่อไม่ได้</p>
+        ) : (
+          integrations.map((item) => (
+            <div
+              key={item.key}
+              className="flex items-start justify-between gap-4 rounded-lg ring-1 ring-white/10 px-4 py-3"
+            >
+              <div className="min-w-0">
+                <div className="flex items-center gap-2">
+                  <span
+                    title={item.detail}
+                    className={`w-2 h-2 rounded-full shrink-0 ${
+                      item.reachable ? "bg-green-400" : "bg-red-400"
+                    }`}
+                  />
+                  <span className="font-medium text-sm text-slate-100">{item.name}</span>
+                  <OverrideTag k={item.key} />
+                </div>
+                <p className="text-xs text-slate-500 mt-1">{item.description}</p>
+                <p className="text-xs text-slate-500 font-mono truncate">{item.url}</p>
+                <p
+                  className={`text-xs mt-0.5 ${
+                    item.reachable ? "text-green-400" : "text-red-400"
+                  }`}
+                >
+                  {item.reachable ? "✓ " : "✗ "}
+                  {item.detail}
+                </p>
+              </div>
+              {/* สวิตช์เปิด/ปิด */}
+              <button
+                type="button"
+                disabled={togglingKey === item.key}
+                onClick={() => toggleIntegration(item)}
+                className={`shrink-0 mt-1 w-11 h-6 rounded-full transition-colors relative disabled:opacity-50 ${
+                  item.enabled ? "bg-indigo-500" : "bg-white/15"
+                }`}
+                aria-label={`${item.enabled ? "ปิด" : "เปิด"} ${item.name}`}
+              >
+                <span
+                  className={`absolute top-0.5 w-5 h-5 rounded-full bg-white transition-all ${
+                    item.enabled ? "left-[22px]" : "left-0.5"
+                  }`}
+                />
+              </button>
+            </div>
+          ))
+        )}
+      </div>
 
       <form onSubmit={save} className="glass rounded-xl p-5 space-y-5">
         {/* 1. การเชื่อมต่อ Ollama */}

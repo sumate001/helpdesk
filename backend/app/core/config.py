@@ -42,8 +42,10 @@ class Settings(BaseSettings):
     FORM_MATCH_MARGIN: float = 0.08
 
     # itamtv (ระบบแจ้งซ่อมกลาง) + Amarin Employee Database — เปิดเคสคู่ขนาน/ดึงข้อมูลเครื่อง
+    # สองสวิตช์นี้เปิด/ปิดสดได้จากหน้า Settings (override ใน DB) — ค่านี้เป็นค่าตั้งต้น
     ITAMTV_ENABLED: bool = True
     ITAMTV_ADDJOB_URL: str = "http://10.7.1.17/webappl/itamtv/AddJob.aspx?okeXch0Ka3eu"
+    EMPLOYEE_LOOKUP_ENABLED: bool = True
     EMPLOYEE_DB_URL: str = "http://10.7.255.227:5100"
 
     # MinIO
