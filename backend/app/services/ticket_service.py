@@ -81,6 +81,42 @@ def create_ticket(
     return ticket
 
 
+STATUS_LABELS_TH = {
+    "open": "รอทีม IT รับเรื่อง",
+    "pending_approval": "รออนุมัติ",
+    "in_progress": "ทีม IT กำลังดำเนินการ",
+    "resolved": "แก้ไขเสร็จแล้ว",
+    "closed": "ปิดเคสแล้ว",
+    "ai_answered": "แก้ได้จากคำแนะนำเบื้องต้น",
+}
+
+
+def recent_tickets(db: Session, line_user_db_id: int, limit: int = 5) -> list[dict]:
+    """ticket ล่าสุดของผู้แจ้งคนนี้ → ป้อนเข้า system prompt ให้ AI ตอบเรื่องสถานะได้เอง.
+
+    เอาทุกสถานะ (รวม closed) เพราะผู้ใช้มักถามถึงเคสที่เพิ่งปิดไปด้วย.
+    """
+    rows = (
+        db.query(Ticket)
+        .filter(Ticket.line_user_id == line_user_db_id)
+        .order_by(Ticket.id.desc())
+        .limit(limit)
+        .all()
+    )
+    return [
+        {
+            "ticket_no": t.ticket_no,
+            "title": t.title,
+            "status": t.status,
+            "status_th": STATUS_LABELS_TH.get(t.status, t.status),
+            "assignee": t.assignee.display_name if t.assignee else None,
+            "created_at": t.created_at.strftime("%d/%m/%Y %H:%M") if t.created_at else None,
+            "resolved_at": t.resolved_at.strftime("%d/%m/%Y %H:%M") if t.resolved_at else None,
+        }
+        for t in rows
+    ]
+
+
 def _brief(text: str, limit: int = 500) -> str:
     """ตัดรายละเอียดให้พอดีกับ notify — ตัดเฉพาะเมื่อยาวเกินจริง + ใส่ … บอกว่ามีต่อ."""
     text = text or ""

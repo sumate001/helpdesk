@@ -22,7 +22,7 @@ from app.services import itamtv_service, line_service, settings_service, ticket_
 
 logger = logging.getLogger(__name__)
 
-FOLLOWUP_TEXT = "สวัสดีครับ 👋 ขอติดตามเรื่องที่แจ้งไว้นะครับ\nดำเนินการได้แล้วหรือยังครับ?"
+FOLLOWUP_TEXT = "แวะมาตามเรื่องที่คุยกันไว้ครับ 👋 พอจะได้ลองหรือยัง เป็นยังไงบ้าง?"
 
 
 def mark_responded(db: Session, ticket_id: int) -> None:
@@ -171,7 +171,7 @@ def _process_escalations(db: Session) -> None:
         db.refresh(ticket)
 
         escalate_text = (
-            f"ทีม IT จะติดตามเรื่องนี้ให้นะครับ 🔧\nหมายเลข Ticket: {ticket.ticket_no}"
+            f"เห็นว่าเงียบไป ผมส่งเรื่องให้ทีม IT ตามต่อให้แล้วนะครับ จะได้ไม่ค้าง 🔧\nเลขที่เคส {ticket.ticket_no}"
         )
         asyncio.run(line_service.push(_push_target(conv), escalate_text))
         asyncio.run(line_service.notify_group(ticket_service.group_notify_text(ticket)))

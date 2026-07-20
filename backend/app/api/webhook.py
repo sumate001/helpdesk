@@ -37,9 +37,9 @@ IMAGE_PLACEHOLDER = "[ผู้ใช้ส่งรูปภาพ]"
 EMP_CODE_RE = re.compile(r"^(?=.*\d)[A-Za-z0-9-]{4,10}$")  # ต้องมีตัวเลข กันชนคำทั่วไป
 EMAIL_RE = re.compile(r"^[\w.+-]+@[\w-]+\.[\w.-]+$")
 REGISTER_PROMPT = (
-    "สวัสดีครับ 👋 ผมเป็นผู้ช่วย IT Support ของ Amarin\n"
-    "รบกวนพิมพ์ \"รหัสพนักงาน\" (หรืออีเมลบริษัท) เพื่อลงทะเบียนก่อนนะครับ\n"
-    "จะได้ไม่ต้องถามข้อมูลซ้ำทุกครั้งที่แจ้งปัญหาครับ 🙏"
+    "สวัสดีครับ 👋 ผมเป็นผู้ช่วย IT Support ของอมรินทร์\n"
+    "ขอรหัสพนักงาน (หรืออีเมลบริษัท) หน่อยครับ\n"
+    "จะได้รู้จักกันไว้ คราวหน้าแจ้งปัญหาจะได้ไม่ต้องถามข้อมูลซ้ำครับ 🙏"
 )
 
 
@@ -185,15 +185,15 @@ async def _handle_postback(db: Session, line_user_id: str, event: dict) -> None:
         .one_or_none()
     )
     if staff is None:
-        await _reply(db, reply_token, "ขออภัยครับ ปุ่มนี้สำหรับเจ้าหน้าที่ IT ที่ลงทะเบียนไว้เท่านั้น")
+        await _reply(db, reply_token, "ปุ่มนี้ใช้ได้เฉพาะเจ้าหน้าที่ IT ที่ลงทะเบียนไว้ครับ")
         return
 
     ticket = db.query(Ticket).filter(Ticket.id == int(data.get("ticket_id", 0))).one_or_none()
     if ticket is None:
-        await _reply(db, reply_token, "ไม่พบ Ticket นี้ในระบบครับ")
+        await _reply(db, reply_token, "หาเคสนี้ในระบบไม่เจอครับ ลองเช็กเลขที่อีกทีได้ไหมครับ")
         return
     if ticket.status in ("resolved", "closed"):
-        await _reply(db, reply_token, f"เคส {ticket.ticket_no} ถูกปิดไปแล้วครับ ✅")
+        await _reply(db, reply_token, f"เคส {ticket.ticket_no} ปิดไปแล้วครับ ✅")
         return
 
     # ปิดฝั่ง dashboard ก่อนเสมอ (แหล่งความจริงหลักของเรา)
@@ -360,16 +360,31 @@ def _update_user_info(db: Session, lu: LineUser, result: dict) -> None:
         db.commit()
 
 
-def _known_info(lu: LineUser) -> dict:
+def _known_info(
+    lu: LineUser, conv: Conversation | None = None, db: Session | None = None
+) -> dict:
     """ข้อมูลผู้ใช้ที่มีอยู่แล้ว → ส่งให้ AI ไม่ถามซ้ำ.
 
     ชื่อเอาจาก Employee DB ก่อน (ผูกตอนลงทะเบียน) — display_name โดน LINE profile
-    เขียนทับได้ตลอด เชื่อไม่ได้ว่าเป็นชื่อจริง."""
-    return {
+    เขียนทับได้ตลอด เชื่อไม่ได้ว่าเป็นชื่อจริง.
+
+    registered: บอก AI ว่าผู้ใช้ผูกกับฐานข้อมูลพนักงานแล้วหรือยัง — ส่งเฉพาะตอนเปิด
+    ระบบทะเบียน (ปิดอยู่ = ไม่มี flow ลงทะเบียน จะพูดถึงก็สับสนเปล่าๆ)."""
+    info = {
         "full_name": lu.emp_name or lu.display_name,
         "building": lu.building,
         "floor": lu.floor,
     }
+    if settings_service.get("EMPLOYEE_LOOKUP_ENABLED"):
+        info["registered"] = lu.employee_id is not None
+        info["emp_code"] = lu.emp_code
+        info["department"] = lu.department
+        # ลงทะเบียนได้เฉพาะแชท 1-1 — ในกลุ่มต้องชวนไปทักบอทส่วนตัวแทน
+        info["can_register_here"] = conv is None or conv.channel == "user"
+    if db is not None:
+        # ticket ล่าสุดของผู้แจ้ง → AI ตอบ "เคสที่แจ้งไปถึงไหนแล้ว" ได้เองโดยไม่ต้องเปิดเคสใหม่
+        info["tickets"] = ticket_service.recent_tickets(db, lu.id)
+    return info
 
 
 async def _try_register(db: Session, lu: LineUser, text: str, reply_token: str) -> bool:
@@ -392,12 +407,12 @@ async def _try_register(db: Session, lu: LineUser, text: str, reply_token: str) 
     except Exception:  # noqa: BLE001
         logger.exception("employee exact lookup failed for %s", key)
         await _reply(db, reply_token,
-                     "ขออภัยครับ ระบบทะเบียนพนักงานติดขัดชั่วคราว ลองใหม่อีกครั้งนะครับ 🙏")
+                     "ตอนนี้ต่อกับระบบทะเบียนพนักงานไม่ติดครับ รบกวนลองใหม่อีกทีนะครับ 🙏")
         return True
     if emp is None:
         await _reply(db, reply_token,
-                     f"ไม่พบ \"{key}\" ในทะเบียนพนักงานครับ 😢\n"
-                     "ลองตรวจรหัสพนักงานอีกครั้ง หรือพิมพ์อีเมลบริษัทแทนได้ครับ")
+                     f"หา \"{key}\" ในทะเบียนพนักงานไม่เจอครับ\n"
+                     "ลองเช็กรหัสอีกทีนะครับ หรือจะพิมพ์อีเมลบริษัทมาแทนก็ได้ครับ")
         return True
 
     lu.employee_id = emp["id"]
@@ -414,9 +429,9 @@ async def _try_register(db: Session, lu: LineUser, text: str, reply_token: str) 
     db.commit()
     dept = f" ({emp['department']})" if emp.get("department") else ""
     await _reply(db, reply_token,
-                 f"ลงทะเบียนเรียบร้อยครับ ✅\nคุณ{emp['name']}{dept}\n"
-                 "มีปัญหา IT แจ้งเข้ามาได้เลยนะครับ 🙌\n"
-                 "(ถ้าข้อมูลไม่ถูกต้อง พิมพ์รหัสพนักงาน/อีเมลใหม่ได้เลยครับ)")
+                 f"เรียบร้อยครับ ✅ สวัสดีคุณ{emp['name']}{dept}\n"
+                 "ต่อไปมีปัญหา IT ทักมาได้เลย ไม่ต้องแนะนำตัวใหม่แล้วครับ 🙌\n"
+                 "(ถ้าข้อมูลไม่ตรง พิมพ์รหัสพนักงานหรืออีเมลใหม่มาได้เลยครับ)")
     return True
 
 
@@ -484,7 +499,7 @@ async def _run_intake(
         except Exception:  # noqa: BLE001
             logger.exception("RAG retrieve failed")
     result = await ai_service.intake_turn(
-        candidate_history, images=images, known_info=_known_info(lu),
+        candidate_history, images=images, known_info=_known_info(lu, conv, db),
         allow_ignore=allow_ignore, kb_context=kb_context,
     )
 
@@ -529,9 +544,9 @@ async def _run_intake(
         # เคสซ่อม/แก้ไข → เปิดคู่ขนานใน itamtv + แนบข้อมูลเครื่องผู้แจ้ง (best-effort)
         await itamtv_service.mirror_ticket(db, ticket, lu)
     if is_approval:
-        tail = "ทีม IT กำลังพิจารณาอนุมัติให้นะครับ 🙏"
+        tail = "ส่งให้ทีม IT พิจารณาอนุมัติแล้วนะครับ มีความคืบหน้าจะรีบแจ้งครับ 🙏"
     else:
-        tail = "ทีม IT จะรีบดำเนินการให้นะครับ 🔧"
+        tail = "ส่งเรื่องให้ทีม IT แล้วนะครับ เดี๋ยวมีคนมาดูให้ 🔧"
     await _reply(
         db,
         reply_token,
@@ -599,7 +614,7 @@ async def _handle_followup_quickreply(
             ticket.resolved_at = datetime.now(timezone.utc)
             followup_service.mark_responded(db, ticket.id)
             db.commit()
-        await _reply(db, reply_token, "เยี่ยมเลยครับ 🎉 ขอบคุณที่ใช้บริการนะครับ")
+        await _reply(db, reply_token, "เยี่ยมเลยครับ 🎉 มีอะไรอีกทักมาได้ตลอดนะครับ")
         return
     # NOT_RESOLVED → escalate เฉพาะ ticket ที่ยังไม่ได้เป็น L2 open อยู่แล้ว (กันแจ้งกลุ่มซ้ำ)
     if ticket and not (ticket.type == "L2" and ticket.status == "open"):
@@ -612,7 +627,7 @@ async def _handle_followup_quickreply(
     elif ticket:
         followup_service.mark_responded(db, ticket.id)
         db.commit()
-    await _reply(db, reply_token, "ทีม IT จะรีบเข้ามาช่วยดูแลให้นะครับ 🔧")
+    await _reply(db, reply_token, "โอเคครับ เดี๋ยวผมส่งให้ทีม IT เข้ามาดูให้นะครับ 🔧")
 
 
 async def _handle_user_image(
@@ -634,7 +649,7 @@ async def _handle_user_image(
                 content = await line_service.get_message_content(message_id)
                 _store_attachment(db, ticket, message_id, content)
                 await _reply(
-                    db, reply_token, f"แนบรูปเข้า Ticket {ticket.ticket_no} ให้แล้วครับ 📎"
+                    db, reply_token, f"แนบรูปเข้าเคส {ticket.ticket_no} ให้แล้วครับ 📎"
                 )
             except Exception:  # noqa: BLE001
                 logger.exception("failed to attach 1-1 image")
