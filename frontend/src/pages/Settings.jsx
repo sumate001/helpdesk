@@ -70,6 +70,7 @@ export default function Settings() {
       [...MODEL_FIELDS, ...NUM_FIELDS].forEach((x) => (f[x.key] = String(data[x.key])));
       f.OLLAMA_BASE_URL = data.OLLAMA_BASE_URL;
       f.FOLLOWUP_ENABLED = data.FOLLOWUP_ENABLED;
+      f.TICKET_CONFIRM_REQUIRED = data.TICKET_CONFIRM_REQUIRED;
       setForm(f);
       // auto-connect ด้วยค่าที่บันทึกไว้
       setConn({ status: "checking", text: "กำลังเชื่อมต่อ..." });
@@ -97,6 +98,7 @@ export default function Settings() {
       MODEL_FIELDS.forEach((f) => (payload[f.key] = form[f.key]));
       NUM_FIELDS.forEach((f) => (payload[f.key] = Number(form[f.key])));
       payload.FOLLOWUP_ENABLED = !!form.FOLLOWUP_ENABLED;
+      payload.TICKET_CONFIRM_REQUIRED = !!form.TICKET_CONFIRM_REQUIRED;
       const { data } = await api.patch("/settings", payload);
       setData(data);
       setMsg({ type: "ok", text: "บันทึกแล้ว — มีผลทันที ไม่ต้อง restart" });
@@ -112,7 +114,10 @@ export default function Settings() {
       setData(data);
       setForm((f) => ({
         ...f,
-        [key]: key === "FOLLOWUP_ENABLED" ? data[key] : String(data[key]),
+        [key]:
+          key === "FOLLOWUP_ENABLED" || key === "TICKET_CONFIRM_REQUIRED"
+            ? data[key]
+            : String(data[key]),
       }));
       setMsg({ type: "ok", text: `คืนค่า ${key} กลับเป็นค่าตั้งต้น (.env) แล้ว` });
     });
@@ -314,6 +319,40 @@ export default function Settings() {
               onChange={(e) => setForm({ ...form, FOLLOWUP_ENABLED: e.target.checked })}
             />
             {form.FOLLOWUP_ENABLED ? "เปิดใช้งาน" : "ปิดอยู่"}
+          </label>
+        </div>
+
+        {/* 5. Ticket confirm toggle */}
+        <div>
+          <div className="flex items-center gap-2">
+            <label className="font-medium text-sm text-slate-100">
+              ยืนยันก่อนเปิด Ticket
+            </label>
+            <OverrideTag k="TICKET_CONFIRM_REQUIRED" />
+            {overridden.has("TICKET_CONFIRM_REQUIRED") && (
+              <button
+                type="button"
+                onClick={() => resetField("TICKET_CONFIRM_REQUIRED")}
+                className="text-xs text-slate-400 hover:text-slate-200 hover:underline ml-auto"
+              >
+                คืนค่าตั้งต้น
+              </button>
+            )}
+          </div>
+          <p className="text-xs text-slate-500 mt-0.5 mb-1.5">
+            เปิด = บอทสรุปเรื่องแล้วขึ้นปุ่มให้ผู้ใช้กด "เปิด Ticket ✅" ก่อนถึงจะเปิดเคส —
+            ปิด = เมื่อข้อมูลครบบอทเปิดเคสให้ทันทีโดยไม่ถามยืนยัน
+          </p>
+          <label className="flex items-center gap-2 text-sm text-slate-200 cursor-pointer w-fit">
+            <input
+              type="checkbox"
+              className="accent-indigo-500 w-4 h-4"
+              checked={!!form.TICKET_CONFIRM_REQUIRED}
+              onChange={(e) =>
+                setForm({ ...form, TICKET_CONFIRM_REQUIRED: e.target.checked })
+              }
+            />
+            {form.TICKET_CONFIRM_REQUIRED ? "ต้องยืนยันก่อนเปิด" : "เปิดเคสทันทีเมื่อข้อมูลครบ"}
           </label>
         </div>
 

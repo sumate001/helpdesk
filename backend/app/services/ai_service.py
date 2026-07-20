@@ -160,17 +160,29 @@ priority: low, medium, high, critical | type: L1 หรือ L2
 - description ต้องเขียนให้ช่าง IT หยิบไปทำต่อได้เลย รวบรวมจากบทสนทนาทั้งหมด: อาการ/ปัญหา, อุปกรณ์-รุ่น-asset tag, ข้อความ error, เวลาที่เริ่ม, ขอบเขตผลกระทบ, สิ่งที่ลองแก้แล้ว + ชื่อผู้แจ้ง/อาคาร/ชั้น (อย่าใส่แค่ประโยคเดียวลอยๆ)
 - full_name/building/floor ใส่เมื่อทราบ (จากผู้ใช้หรือจากข้อมูลที่ทราบแล้ว) ไม่งั้น null"""
 
+# ต่อท้าย system prompt เมื่อ TICKET_CONFIRM_REQUIRED ปิด — ทับกฎยืนยันด้านบนทั้งหมด
+NO_CONFIRM_BLOCK = """
+
+*** โหมดเปิดเคสทันที (ทับกฎยืนยันทั้งหมดด้านบน): ระบบนี้ปิดขั้นตอนยืนยันเปิด Ticket ***
+- ห้ามถามว่า "ยืนยันเปิด Ticket ไหม" และตั้ง needs_confirm=false เสมอทุกเทิร์น
+- เมื่อได้ข้อมูลครบ (ชื่อ/อาคาร/ชั้น + รายละเอียดปัญหา) → action="open" ทันที
+  พร้อม reply สรุปสั้นๆ บอกผู้ใช้ว่าเปิดเคสให้เรียบร้อยแล้ว
+- ยังขาดข้อมูล → action="ask" ถามเฉพาะที่ขาดตามกฎเดิม"""
+
 VALID_ACTIONS = {"ask", "resolved", "open"}
 
 CONFIRM_OPEN_TEXT = "เปิด Ticket ✅"  # ข้อความจากปุ่ม quick reply "confirm"
 
 
 def _confirm_was_requested(history: list[dict]) -> bool:
-    """เทิร์น assistant ล่าสุดใน history ขึ้นปุ่มยืนยันเปิด ticket ไปหรือยัง
-    (webhook เก็บ marker needs_confirm ไว้ใน transcript)."""
+    """เทิร์น assistant ล่าสุดใน history "ขอยืนยันเปิด ticket" ไปหรือยัง — ดูจาก marker
+    needs_confirm ที่ webhook เก็บไว้ใน transcript หรือเนื้อหาข้อความที่เป็นการขอยืนยันชัดๆ
+    (กันเคสที่ marker หลุดเพราะ heuristic ตัดปุ่มทิ้ง แต่ผู้ใช้พิมพ์ยืนยันกลับมาเองแล้ว)."""
     for m in reversed(history):
         if m["role"] == "assistant":
-            return bool(m.get("needs_confirm"))
+            return bool(m.get("needs_confirm")) or _looks_like_confirm_request(
+                m.get("content", "")
+            )
     return False
 
 # วลีที่บ่งว่า reply กำลัง "สรุป + ขอยืนยันเปิดเคส" → ควรขึ้นปุ่มยืนยันเสมอ
@@ -338,7 +350,10 @@ async def intake_turn(
     kb_context: ความรู้ระบบ/นโยบาย IT ที่ retrieve มาจาก RAG → ใช้ตอบ/classify ให้ตรงบริษัท.
     คืน dict: reply, action(ask|resolved|open|ignore), needs_confirm, และ field สำหรับเปิด ticket.
     """
+    confirm_required = bool(settings_service.get("TICKET_CONFIRM_REQUIRED"))
     system = INTAKE_SYSTEM_PROMPT + _known_info_block(known_info) + _kb_block(kb_context)
+    if not confirm_required:
+        system += NO_CONFIRM_BLOCK
     if allow_ignore:
         system += IGNORE_BLOCK
     try:
@@ -364,7 +379,7 @@ async def intake_turn(
     # เปิด ticket ได้เฉพาะเมื่อ "ผ่านการยืนยัน" แล้ว: เทิร์นก่อนขึ้นปุ่มยืนยันไว้ หรือ
     # ผู้ใช้กดปุ่มยืนยันตรงๆ — โมเดลข้ามขั้น (open ทันที) → ปรับเป็น ask แล้วปล่อยให้
     # กฎด้านล่างตัดสินว่าเทิร์นนี้ควรขึ้นปุ่มหรือยัง (ถ้า reply ยังขอข้อมูลอยู่ ปุ่มจะไม่ขึ้น)
-    if result["action"] == "open":
+    if result["action"] == "open" and confirm_required:
         last_user = next(
             (m["content"] for m in reversed(history) if m["role"] == "user"), ""
         )
@@ -377,13 +392,12 @@ async def intake_turn(
             result["needs_confirm"] = True
 
     if result["action"] == "ask":
-        if not _has_required_identity(result, known_info):
-            # ยังเก็บข้อมูลผู้แจ้งไม่ครบ (ชื่อ/อาคาร/ชั้น) → ยังไม่ถึงขั้นยืนยัน
-            # ห้ามขึ้นปุ่ม แม้โมเดลจะตั้ง needs_confirm มา (กันบอทถามแล้วเด้งปุ่มเลย)
+        if not confirm_required:
+            # โหมดเปิดเคสทันที — ไม่มีขั้นยืนยัน จึงไม่ขึ้นปุ่มยืนยันเลย
             result["needs_confirm"] = False
         else:
             if not result["needs_confirm"] and _looks_like_confirm_request(result["reply"]):
-                # ข้อมูลครบแล้ว + reply เป็นการสรุป/ขอยืนยัน แต่โมเดลลืมตั้ง → บังคับขึ้นปุ่ม
+                # reply เป็นการสรุป/ขอยืนยัน แต่โมเดลลืมตั้ง → บังคับขึ้นปุ่ม
                 result["needs_confirm"] = True
             if result["needs_confirm"] and (
                 _reply_has_extra_question(result["reply"])
@@ -393,6 +407,15 @@ async def intake_turn(
                 # วินิจฉัย" อยู่ (แม้จะคำถามเดียว เช่น "ขอทราบรุ่นเครื่อง...แล้วจะเปิดเคสให้") —
                 # ต้องรอผู้ใช้ตอบข้อมูลก่อน ยังไม่ขึ้นปุ่มยืนยันในเทิร์นนี้ ไม่ว่า needs_confirm
                 # จะมาจากโมเดลหรือถูกบังคับตั้งจากด้านบนก็ตาม
+                result["needs_confirm"] = False
+            if (
+                result["needs_confirm"]
+                and not _has_required_identity(result, known_info)
+                and not _looks_like_confirm_request(result["reply"])
+            ):
+                # โมเดลตั้ง needs_confirm มาทั้งที่ reply ไม่ใช่การขอยืนยัน และข้อมูลผู้แจ้ง
+                # ยังไม่ครบ → ยังไม่ถึงขั้นยืนยัน (แต่ถ้า reply เป็นการสรุป+ขอยืนยันจริง
+                # ให้ปุ่มขึ้นแม้ขาดชื่อ/ชั้น — ห้าม block จนผู้ใช้เปิดเคสไม่ได้)
                 result["needs_confirm"] = False
 
     if result["action"] in ("open", "resolved"):

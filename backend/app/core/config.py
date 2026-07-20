@@ -60,6 +60,10 @@ class Settings(BaseSettings):
     # Follow-up flow (ผู้ใช้เงียบกลางบทสนทนา → ถามซ้ำ → เปิด ticket อัตโนมัติ)
     # เปิด/ปิดสดได้จากหน้า Settings (override ใน DB) — ค่านี้เป็นค่าตั้งต้น
     FOLLOWUP_ENABLED: bool = True
+
+    # ต้องให้ผู้ใช้กดยืนยันก่อนเปิด ticket ไหม — ปิดแล้วบอทเปิดเคสทันทีเมื่อข้อมูลครบ
+    # เปิด/ปิดสดได้จากหน้า Settings (override ใน DB) — ค่านี้เป็นค่าตั้งต้น
+    TICKET_CONFIRM_REQUIRED: bool = True
     FOLLOWUP_DELAY_MINUTES: int = 10
     ESCALATE_DELAY_MINUTES: int = 30
 

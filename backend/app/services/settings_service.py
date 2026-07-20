@@ -37,6 +37,7 @@ EDITABLE_KEYS: dict[str, Callable[[Any], Any]] = {
     "RAG_TOP_K": int,
     "RAG_MIN_SIMILARITY": float,
     "FOLLOWUP_ENABLED": _to_bool,
+    "TICKET_CONFIRM_REQUIRED": _to_bool,
 }
 
 _cache: dict[str, Any] = {}
