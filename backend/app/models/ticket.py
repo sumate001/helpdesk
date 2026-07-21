@@ -25,6 +25,10 @@ class Ticket(Base):
     # ครั้งล่าสุดที่บอทตามถามความคืบหน้าจากช่างที่รับงาน (in_progress) ทาง LINE —
     # scheduler ใช้เว้นจังหวะทุก STAFF_PROGRESS_MINUTES นาที
     staff_progress_ping_at: Mapped[datetime | None] = mapped_column(DateTime)
+    # ผู้แจ้งเคส phone-in (staff เปิดแทนทางโทรศัพท์) — ไม่มี line_user จึงเก็บชื่อ/รายละเอียด
+    # ผู้แจ้งไว้ตรงนี้เพื่อโชว์ในรายการเคส/แจ้งกลุ่ม/get_ticket
+    reporter_name: Mapped[str | None] = mapped_column(String(100))
+    reporter_detail: Mapped[str | None] = mapped_column(String(255))  # แผนก · ตึก-ชั้น · เบอร์
     sla_policy_id: Mapped[int | None] = mapped_column(ForeignKey("sla_policies.id"))
     sla_response_due_at: Mapped[datetime | None] = mapped_column(DateTime)
     sla_resolve_due_at: Mapped[datetime | None] = mapped_column(DateTime)

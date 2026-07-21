@@ -668,6 +668,16 @@ async def _staff_create_ticket(db: Session, staff: User, args: dict) -> str:
         ticket_type="L2", priority=priority, status="in_progress",
     )
     ticket.assigned_to = staff.id
+    ticket.reporter_name = reporter_name[:100]
+    building = str(args.get("building") or "").strip()
+    floor = str(args.get("floor") or "").strip()
+    loc = "-".join(p for p in (building, f"ชั้น {floor}" if floor else "") if p)
+    detail_parts = [p for p in (
+        (emp or {}).get("department"), loc or None, (emp or {}).get("phone")
+    ) if p]
+    ticket.reporter_detail = (" · ".join(detail_parts) or None)
+    if ticket.reporter_detail:
+        ticket.reporter_detail = ticket.reporter_detail[:255]
     db.add(TicketComment(
         ticket_id=ticket.id, user_id=staff.id, is_internal=True,
         content=f"เปิดเคสแทนผู้แจ้งทางโทรศัพท์ โดย {staff.display_name or staff.username}",

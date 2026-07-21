@@ -120,6 +120,9 @@ def recent_tickets(db: Session, line_user_db_id: int, limit: int = 5) -> list[di
 def _ticket_dict(t: Ticket) -> dict:
     """สรุป ticket หนึ่งใบเป็น dict ให้ staff assistant อ่าน (มีชื่อผู้แจ้ง/ผู้ดูแล)."""
     lu = t.line_user
+    # ผู้แจ้ง: LINE user ถ้ามี, ไม่งั้น fallback ผู้แจ้ง phone-in ที่ staff เปิดแทน
+    reporter = (lu.emp_name or lu.display_name) if lu else t.reporter_name
+    department = (lu.department if lu else None) or (t.reporter_detail if not lu else None)
     return {
         "ticket_no": t.ticket_no,
         "title": t.title,
@@ -127,8 +130,8 @@ def _ticket_dict(t: Ticket) -> dict:
         "priority": t.priority,
         "status": t.status,
         "status_th": STATUS_LABELS_TH.get(t.status, t.status),
-        "reporter": (lu.emp_name or lu.display_name) if lu else None,
-        "department": (lu.department if lu else None),
+        "reporter": reporter,
+        "department": department,
         "assignee": t.assignee.display_name if t.assignee else None,
         "description": _brief(t.description or t.title or "", 300),
         "created_at": t.created_at.strftime("%d/%m/%Y %H:%M") if t.created_at else None,
@@ -176,8 +179,9 @@ def _brief(text: str, limit: int = 500) -> str:
 
 def group_notify_text(ticket: Ticket) -> str:
     lu = ticket.line_user
-    who = lu.display_name if lu else "-"
-    dept = (lu.department or "-") if lu else "-"
+    # เคส phone-in ไม่มี line_user → ใช้ชื่อ/รายละเอียดผู้แจ้งที่ staff กรอกไว้แทน
+    who = (lu.display_name if lu else ticket.reporter_name) or "-"
+    dept = ((lu.department or "-") if lu else (ticket.reporter_detail or "-")) or "-"
     loc = ""
     if lu and (lu.building or lu.floor):
         loc = f" ({lu.building or ''}-{lu.floor or ''})"
