@@ -588,7 +588,109 @@ async def _staff_run_tool(db: Session, staff: User, tool: str, args: dict) -> st
             "ok": True, "ticket_no": t.ticket_no, "status": t.status, "itamtv": note.strip(),
         }, ensure_ascii=False)
 
+    if tool == "create_ticket":
+        return await _staff_create_ticket(db, staff, args)
+
     return _json.dumps({"error": "ไม่รู้จักเครื่องมือนี้"}, ensure_ascii=False)
+
+
+_VALID_TICKET_CATEGORIES = (
+    "hardware", "software", "network", "account",
+    "service_request", "equipment_request", "other",
+)
+_VALID_TICKET_PRIORITIES = ("low", "medium", "high", "critical")
+
+
+async def _staff_create_ticket(db: Session, staff: User, args: dict) -> str:
+    """เปิด ticket แทนผู้แจ้งทางโทรศัพท์ตามที่ staff สั่ง → assign ให้ staff + in_progress.
+
+    ผู้แจ้งหาไม่เจอ/เจอหลายคน → คืน error ให้ AI ถามกลับ (ไม่เดา). best-effort mirror itamtv.
+    """
+    import json as _json
+
+    emp = None
+    try:
+        if args.get("reporter_emp_code"):
+            emp = await itamtv_service.lookup_employee_exact(
+                emp_code=str(args["reporter_emp_code"])
+            )
+            if emp is None:
+                return _json.dumps(
+                    {"error": f"หารหัสพนักงาน {args['reporter_emp_code']} ไม่เจอ ให้ถาม staff ยืนยัน"},
+                    ensure_ascii=False,
+                )
+        elif args.get("reporter_name"):
+            found = await itamtv_service.search_employees(str(args["reporter_name"]))
+            if len(found) == 1:
+                emp = found[0]
+            elif len(found) == 0:
+                return _json.dumps(
+                    {"error": f"หาพนักงานชื่อ '{args['reporter_name']}' ไม่เจอ ให้ถาม staff ระบุใหม่"},
+                    ensure_ascii=False,
+                )
+            else:
+                return _json.dumps({
+                    "error": "เจอพนักงานหลายคน ให้ถาม staff ว่าคนไหน",
+                    "candidates": [
+                        {"name": e.get("name"), "emp_code": e.get("emp_code"),
+                         "department": e.get("department")} for e in found
+                    ],
+                }, ensure_ascii=False)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("create_ticket reporter lookup failed: %s", exc)
+        return _json.dumps({"error": "ต่อกับระบบพนักงานไม่ติด ลองใหม่อีกที"}, ensure_ascii=False)
+
+    reporter_name = (emp or {}).get("name") or str(args.get("reporter_name") or "").strip()
+    if not reporter_name:
+        return _json.dumps({"error": "ยังไม่รู้ว่าใครเป็นผู้แจ้ง ให้ถาม staff ก่อน"},
+                           ensure_ascii=False)
+
+    category = args.get("category")
+    if category not in _VALID_TICKET_CATEGORIES:
+        category = "other"
+    priority = args.get("priority")
+    if priority not in _VALID_TICKET_PRIORITIES:
+        priority = "medium"
+    title = (str(args.get("title") or "").strip() or f"{reporter_name} แจ้งปัญหา")[:255]
+
+    dept = (emp or {}).get("department") or "-"
+    code = (emp or {}).get("emp_code") or "-"
+    header = f"[เปิดโดยเจ้าหน้าที่ทางโทรศัพท์] ผู้แจ้ง: {reporter_name} ({dept}) รหัส {code}"
+    description = header + "\n\n" + str(args.get("description") or "").strip()
+
+    ticket = ticket_service.create_ticket(
+        db, title=title, description=description, category=category,
+        ticket_type="L2", priority=priority, status="in_progress",
+    )
+    ticket.assigned_to = staff.id
+    db.add(TicketComment(
+        ticket_id=ticket.id, user_id=staff.id, is_internal=True,
+        content=f"เปิดเคสแทนผู้แจ้งทางโทรศัพท์ โดย {staff.display_name or staff.username}",
+    ))
+    db.commit()
+    db.refresh(ticket)
+
+    # mirror itamtv ด้วยข้อมูลผู้แจ้ง (สร้าง LineUser ชั่วคราว ไม่ผูก DB — mirror อ่าน attr อย่างเดียว)
+    lu = LineUser(
+        line_user_id=f"phone-in:{ticket.ticket_no}",
+        emp_name=reporter_name, emp_code=(emp or {}).get("emp_code"),
+        emp_email=(emp or {}).get("email"), department=(emp or {}).get("department"),
+        building=str(args.get("building") or "").strip() or None,
+        floor=str(args.get("floor") or "").strip() or None,
+    )
+    try:
+        await itamtv_service.mirror_ticket(db, ticket, lu)
+    except Exception:  # noqa: BLE001
+        logger.exception("mirror phone-in ticket %s failed", ticket.ticket_no)
+    try:
+        await _notify_group(db, ticket_service.group_notify_text(ticket))
+    except Exception:  # noqa: BLE001
+        logger.exception("group notify phone-in ticket %s failed", ticket.ticket_no)
+
+    return _json.dumps({
+        "ok": True, "ticket_no": ticket.ticket_no, "reporter": reporter_name,
+        "status": "in_progress", "assigned_to": staff.display_name or staff.username,
+    }, ensure_ascii=False)
 
 
 async def _run_staff_assistant(
