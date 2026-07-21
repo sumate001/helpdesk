@@ -540,6 +540,19 @@ async def _staff_run_tool(db: Session, staff: User, tool: str, args: dict) -> st
             return _json.dumps({"error": "ไม่พบเคสนี้"}, ensure_ascii=False)
         return _json.dumps(ticket_service._ticket_dict(t), ensure_ascii=False)
 
+    if tool == "search_employees":
+        try:
+            emps = await itamtv_service.search_employees(str(args.get("query", "")))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("search_employees failed: %s", exc)
+            return _json.dumps({"error": "ต่อกับระบบพนักงานไม่ติด"}, ensure_ascii=False)
+        people = [
+            {"name": e.get("name"), "emp_code": e.get("emp_code"),
+             "department": e.get("department"), "position": e.get("position")}
+            for e in emps
+        ]
+        return _json.dumps({"count": len(people), "employees": people}, ensure_ascii=False)
+
     if tool == "list_assets":
         emp = None
         try:
@@ -585,25 +598,34 @@ async def _run_staff_assistant(
 
     วนเรียก ai_service.staff_turn: ถ้า action=tool → รันเครื่องมือ เติมผลลัพธ์เข้า history
     แล้วเรียกซ้ำ (จำกัดรอบกัน loop) จนกว่าจะได้ action=answer → ตอบ staff.
+
+    เก็บ transcript ใน conversations (channel="staff") เพื่อจำบริบทข้ามข้อความ — รวมผล
+    เครื่องมือ (role=tool) ด้วย ให้ถามต่อเนื่องได้ (เช่น "ชื่อจริงคนนั้นคืออะไร").
+    conversation channel="staff" ถูกกันออกจาก followup/escalation (ไม่เปิด ticket).
     """
     import json
 
-    history: list[dict] = [{"role": "user", "content": text.strip() or "-"}]
+    conv = conversation_service.get_active(db, "staff", None, staff.line_user_id)
+    if conv is None:
+        conv = conversation_service.start(db, "staff", None, staff.line_user_id)
+    conversation_service.append_message(db, conv, "user", text.strip() or "-")
+
+    history = conversation_service.get_transcript(conv)
     for _ in range(5):
         result = await ai_service.staff_turn(history)
         if result["action"] == "answer":
+            conversation_service.append_message(db, conv, "assistant", result["reply"])
             await _reply(db, reply_token, result["reply"])
             return
-        # action == "tool" → บันทึกคำสั่งที่ AI เรียกไว้ใน history ให้มันเห็นบริบทรอบถัดไป
-        history.append({
-            "role": "assistant",
-            "content": json.dumps(
-                {"action": "tool", "tool": result["tool"], "args": result["args"]},
-                ensure_ascii=False,
-            ),
-        })
+        # action == "tool" → บันทึกคำสั่ง + ผลลัพธ์ลง transcript ให้จำข้ามข้อความได้
+        call = json.dumps(
+            {"action": "tool", "tool": result["tool"], "args": result["args"]},
+            ensure_ascii=False,
+        )
+        conversation_service.append_message(db, conv, "assistant", call)
         tool_out = await _staff_run_tool(db, staff, result["tool"], result["args"])
-        history.append({"role": "tool", "content": tool_out})
+        conversation_service.append_message(db, conv, "tool", tool_out)
+        history = conversation_service.get_transcript(conv)
     # เรียกเครื่องมือวนเกินลิมิต → บอกให้ลองใหม่ (กันค้าง)
     await _reply(db, reply_token,
                  "ขอโทษครับ ผมประมวลผลคำขอนี้ไม่จบ ลองถามใหม่แบบเจาะจงขึ้นได้ไหมครับ 🙏")

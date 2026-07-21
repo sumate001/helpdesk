@@ -117,6 +117,7 @@ def _silent_conversations(db: Session, minutes: int, followed_up: bool) -> list[
         db.query(Conversation)
         .filter(
             Conversation.status == "active",
+            Conversation.channel.in_(("user", "group")),  # กัน channel="staff" (ผู้ช่วย IT) โดนเปิด ticket
             Conversation.ticket_id.is_(None),
             Conversation.updated_at <= threshold,
         )

@@ -69,6 +69,19 @@ async def lookup_employee(full_name: str) -> dict | None:
     return employees[0] if len(employees) == 1 else None
 
 
+async def search_employees(query: str, limit: int = 20) -> list[dict]:
+    """ค้นพนักงานจากชื่อ/คำค้น (ยิง ?q=) → คืน list ทั้งหมดที่เจอ (ไม่จำกัดว่าต้องเจอคนเดียว
+    เหมือน lookup_employee) — ใช้ตอบ 'มีคนชื่อ...กี่คน / ชื่อจริงว่าอะไร'."""
+    base = get_settings().EMPLOYEE_DB_URL
+    if not base or not (query or "").strip():
+        return []
+    async with httpx.AsyncClient(timeout=10) as client:
+        resp = await client.get(f"{base}/api/employees", params={"q": query.strip()})
+        resp.raise_for_status()
+        employees = resp.json().get("employees", [])
+    return employees[:limit]
+
+
 async def fetch_assets(employee_id: int) -> list[dict]:
     base = get_settings().EMPLOYEE_DB_URL
     async with httpx.AsyncClient(timeout=10) as client:

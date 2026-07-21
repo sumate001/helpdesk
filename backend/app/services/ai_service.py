@@ -617,6 +617,7 @@ async def intake_turn(
 STAFF_TOOLS = {
     "search_tickets": "ค้นหาเคส — args: status(open|pending_approval|in_progress|resolved|closed, ไม่ใส่=ทุกสถานะ), assignee('me'=เฉพาะเคสของฉัน), query(คำค้นในหัวข้อ/รายละเอียด/เลขเคส)",
     "get_ticket": "ดูรายละเอียดเคสเดียว — args: ticket_no (เช่น TK-20260721-0001)",
+    "search_employees": "ค้นพนักงานจากชื่อ/คำค้น คืนรายชื่อที่เจอทั้งหมด (ชื่อจริง/รหัส/แผนก) — args: query. ใช้ตอบ 'มีคนชื่อ...กี่คน / ชื่อจริงว่าอะไร'",
     "list_assets": "ดูอุปกรณ์ที่พนักงานคนหนึ่งถือครอง — args: emp_code(รหัสพนักงาน) หรือ name(ชื่อ)",
     "set_status": "เปลี่ยนสถานะเคส — args: ticket_no, status(in_progress|resolved) — sync itamtv ให้อัตโนมัติ",
 }
