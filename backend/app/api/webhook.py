@@ -734,10 +734,82 @@ async def _run_staff_assistant(
         conversation_service.append_message(db, conv, "assistant", call)
         tool_out = await _staff_run_tool(db, staff, result["tool"], result["args"])
         conversation_service.append_message(db, conv, "tool", tool_out)
+
+        # กันมั่วขั้นสรุป: โมเดลเชื่อไม่ได้เวลาต้องอ่านผล tool มาเรียบเรียง (เคยได้ 5 คน
+        # แต่ตอบ "ไม่พบ"). สำหรับ tool ที่ "แสดงข้อมูล/ยืนยันผล" ให้ "โค้ด" จัดรูปคำตอบเอง
+        # จากผลจริง แล้วตอบ staff เลย — โมเดลมีหน้าที่แค่เลือก tool+args เท่านั้น
+        rendered = _render_staff_tool(result["tool"], json.loads(tool_out), result["args"])
+        if rendered is not None:
+            conversation_service.append_message(db, conv, "assistant", rendered)
+            await _reply(db, reply_token, rendered)
+            return
+        # tool ที่ยัง error/ต้องให้โมเดลถามต่อ (เช่น create_ticket เจอผู้แจ้งหลายคน) → วนต่อ
         history = conversation_service.get_transcript(conv)[-_STAFF_HISTORY_LIMIT:]
     # เรียกเครื่องมือวนเกินลิมิต → บอกให้ลองใหม่ (กันค้าง)
     await _reply(db, reply_token,
                  "ขอโทษครับ ผมประมวลผลคำขอนี้ไม่จบ ลองถามใหม่แบบเจาะจงขึ้นได้ไหมครับ 🙏")
+
+
+def _render_staff_tool(tool: str, data: dict, args: dict) -> str | None:
+    """จัดรูปผล tool เป็นข้อความให้ staff แบบ deterministic (ไม่ผ่านโมเดล) — กันมั่ว 100%.
+
+    คืน None = ปล่อยให้โมเดลจัดการต่อ (เช่น create_ticket ที่ยัง error ต้องถามผู้แจ้งใหม่).
+    """
+    if tool == "search_employees":
+        emps = data.get("employees", [])
+        q = args.get("query", "")
+        if not emps:
+            return f"ค้นหา '{q}' ไม่พบพนักงานในระบบครับ ลองใช้ชื่อจริง/ชื่อเล่นอื่นดูได้ครับ"
+        lines = [f"เจอพนักงานที่ตรงกับ '{q}' {len(emps)} คนครับ:"]
+        for i, e in enumerate(emps, 1):
+            nick = f" ({e['nickname']})" if e.get("nickname") else ""
+            dept = e.get("department") or "-"
+            ref = e.get("emp_code") or (f"id {e['id']}" if e.get("id") else "-")
+            lines.append(f"{i}. {e.get('name')}{nick} — {dept} · {ref}")
+        return "\n".join(lines)
+
+    if tool == "list_assets":
+        if data.get("error"):
+            return f"{data['error']}ครับ"
+        return f"อุปกรณ์ที่ {data.get('employee')} ถือครอง:\n{data.get('assets')}"
+
+    if tool == "search_tickets":
+        tickets = data.get("tickets", [])
+        if not tickets:
+            return "ไม่พบเคสที่ตรงกับที่ค้นครับ"
+        lines = ["เคสที่เจอครับ:"]
+        for t in tickets:
+            lines.append(
+                f"- {t.get('ticket_no')} [{t.get('status_th')}] {t.get('title')}"
+                f" — ผู้แจ้ง {t.get('reporter') or '-'}"
+                + (f" · ดูแลโดย {t['assignee']}" if t.get("assignee") else "")
+            )
+        return "\n".join(lines)
+
+    if tool == "get_ticket":
+        if data.get("error"):
+            return f"{data['error']}ครับ"
+        return (
+            f"{data.get('ticket_no')} [{data.get('status_th')}]\n"
+            f"หัวข้อ: {data.get('title')}\n"
+            f"ผู้แจ้ง: {data.get('reporter') or '-'} ({data.get('department') or '-'})\n"
+            f"ผู้ดูแล: {data.get('assignee') or '-'} · ความเร่งด่วน {data.get('priority')}\n"
+            f"{data.get('description') or ''}"
+        )
+
+    if tool == "set_status" and data.get("ok"):
+        th = ticket_service.STATUS_LABELS_TH.get(data.get("status"), data.get("status"))
+        return f"อัปเดตเคส {data.get('ticket_no')} เป็น “{th}” แล้วครับ ✅{data.get('itamtv') or ''}"
+
+    if tool == "create_ticket" and data.get("ok"):
+        return (
+            f"เปิดเคส {data.get('ticket_no')} ให้แล้วครับ ✅\n"
+            f"ผู้แจ้ง: {data.get('reporter')} · assign ให้ {data.get('assigned_to')}"
+            f" · สถานะกำลังดำเนินการ 🔧"
+        )
+
+    # create_ticket/set_status ที่ error → None ให้โมเดลถามต่อ/แจ้ง staff เอง
+    return None
 
 
 def _create_ticket_from_intake(
