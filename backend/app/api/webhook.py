@@ -526,6 +526,8 @@ async def _staff_run_tool(db: Session, staff: User, tool: str, args: dict) -> st
     """รันเครื่องมือที่ผู้ช่วย staff เรียก → คืนผลลัพธ์เป็นข้อความ (ป้อนกลับให้ AI สรุป)."""
     import json as _json
 
+    logger.info("staff tool run: %s(%s) by %s", tool, args, staff.username)
+
     if tool == "search_tickets":
         assignee_id = staff.id if str(args.get("assignee", "")).lower() == "me" else None
         rows = ticket_service.search_tickets(
@@ -547,8 +549,9 @@ async def _staff_run_tool(db: Session, staff: User, tool: str, args: dict) -> st
             logger.warning("search_employees failed: %s", exc)
             return _json.dumps({"error": "ต่อกับระบบพนักงานไม่ติด"}, ensure_ascii=False)
         people = [
-            {"name": e.get("name"), "emp_code": e.get("emp_code"),
-             "department": e.get("department"), "position": e.get("position")}
+            {"id": e.get("id"), "name": e.get("name"), "nickname": e.get("nickname"),
+             "emp_code": e.get("emp_code"), "department": e.get("department"),
+             "position": e.get("position"), "bu": e.get("bu")}
             for e in emps
         ]
         return _json.dumps({"count": len(people), "employees": people}, ensure_ascii=False)
