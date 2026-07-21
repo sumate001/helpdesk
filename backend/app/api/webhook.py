@@ -38,6 +38,8 @@ EMP_CODE_RE = re.compile(r"^(?=.*\d)[A-Za-z0-9-]{4,10}$")  # ต้องมี�
 EMAIL_RE = re.compile(r"^[\w.+-]+@[\w-]+\.[\w.-]+$")
 # LINE userId จริง: 'U' + hex 32 ตัว — ใช้แยกจากค่า placeholder ที่ตั้งมือไว้ในตาราง users
 _LINE_USER_ID_RE = re.compile(r"^U[0-9a-f]{32}$")
+# จำนวนข้อความท้ายสุดของบทสนทนา staff ที่ป้อนโมเดล — จำกัดวงพิษถ้าเผลอมั่ว 1 ครั้ง
+_STAFF_HISTORY_LIMIT = 16
 REGISTER_PROMPT = (
     "สวัสดีครับ 👋 ผมเป็นผู้ช่วย IT Support ของอมรินทร์\n"
     "ขอรหัสพนักงาน (หรืออีเมลบริษัท) หน่อยครับ\n"
@@ -715,7 +717,9 @@ async def _run_staff_assistant(
         conv = conversation_service.start(db, "staff", None, staff.line_user_id)
     conversation_service.append_message(db, conv, "user", text.strip() or "-")
 
-    history = conversation_service.get_transcript(conv)
+    # จำกัดความยาว history ที่ป้อนโมเดล — กันของมั่ว/บริบทเก่าสะสมจนหลอนรอบถัดๆ
+    # (ผล tool ของเทิร์นปัจจุบันอยู่ท้าย transcript จึงไม่โดนตัด)
+    history = conversation_service.get_transcript(conv)[-_STAFF_HISTORY_LIMIT:]
     for _ in range(5):
         result = await ai_service.staff_turn(history)
         if result["action"] == "answer":
@@ -730,7 +734,7 @@ async def _run_staff_assistant(
         conversation_service.append_message(db, conv, "assistant", call)
         tool_out = await _staff_run_tool(db, staff, result["tool"], result["args"])
         conversation_service.append_message(db, conv, "tool", tool_out)
-        history = conversation_service.get_transcript(conv)
+        history = conversation_service.get_transcript(conv)[-_STAFF_HISTORY_LIMIT:]
     # เรียกเครื่องมือวนเกินลิมิต → บอกให้ลองใหม่ (กันค้าง)
     await _reply(db, reply_token,
                  "ขอโทษครับ ผมประมวลผลคำขอนี้ไม่จบ ลองถามใหม่แบบเจาะจงขึ้นได้ไหมครับ 🙏")
