@@ -36,6 +36,8 @@ IMAGE_PLACEHOLDER = "[ผู้ใช้ส่งรูปภาพ]"
 # ลงทะเบียนผูกพนักงาน: ข้อความที่หน้าตาเป็นรหัสพนักงาน/อีเมล → ยิง Employee DB /lookup สด
 EMP_CODE_RE = re.compile(r"^(?=.*\d)[A-Za-z0-9-]{4,10}$")  # ต้องมีตัวเลข กันชนคำทั่วไป
 EMAIL_RE = re.compile(r"^[\w.+-]+@[\w-]+\.[\w.-]+$")
+# LINE userId จริง: 'U' + hex 32 ตัว — ใช้แยกจากค่า placeholder ที่ตั้งมือไว้ในตาราง users
+_LINE_USER_ID_RE = re.compile(r"^U[0-9a-f]{32}$")
 REGISTER_PROMPT = (
     "สวัสดีครับ 👋 ผมเป็นผู้ช่วย IT Support ของอมรินทร์\n"
     "ขอรหัสพนักงาน (หรืออีเมลบริษัท) หน่อยครับ\n"
@@ -464,14 +466,17 @@ def _maybe_link_staff(db: Session, lu: LineUser) -> None:
     )
     if staff is None:
         return
-    if staff.line_user_id and staff.line_user_id != lu.line_user_id:
-        # user นี้ผูก LINE อื่นอยู่แล้ว — ไม่แย่งผูก กันสลับตัวโดยไม่ตั้งใจ
-        logger.info("staff %s ผูก LINE อื่นอยู่แล้ว ข้าม auto-link", staff.username)
+    current = staff.line_user_id
+    # เขียนทับได้เมื่อ: ยังว่าง / เป็น placeholder ที่ไม่ใช่ LINE userId จริง /
+    # เป็น LINE userId จริงแต่เป็นคนละตัว = พนักงานคนเดิม rebind จากเครื่องใหม่ (ผ่าน
+    # employee lookup แล้ว = พิสูจน์ตัวตนแล้ว จึงย้ายให้). ถ้าตรงอยู่แล้วก็ไม่ต้องทำอะไร
+    if current == lu.line_user_id:
         return
-    if staff.line_user_id != lu.line_user_id:
-        staff.line_user_id = lu.line_user_id
-        db.commit()
-        logger.info("auto-link staff %s ↔ LINE %s", staff.username, lu.line_user_id)
+    if current and _LINE_USER_ID_RE.match(current):
+        logger.info("rebind staff %s: LINE %s → %s", staff.username, current, lu.line_user_id)
+    staff.line_user_id = lu.line_user_id
+    db.commit()
+    logger.info("auto-link staff %s ↔ LINE %s", staff.username, lu.line_user_id)
 
 
 async def _apply_ticket_status(
