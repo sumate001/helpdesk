@@ -193,8 +193,8 @@ export default function TicketDetail() {
         <h1 className="text-xl font-bold mt-2 text-glow">{ticket.title}</h1>
         <p className="text-slate-300 mt-2 whitespace-pre-wrap">{ticket.description}</p>
         <div className="text-sm text-slate-400 mt-4 grid grid-cols-2 gap-2">
-          <span>ผู้แจ้ง: {ticket.line_user?.display_name || "-"}</span>
-          <span>แผนก: {ticket.line_user?.department || "-"}</span>
+          <span>ผู้แจ้ง: {ticket.line_user?.display_name || ticket.reporter_name || "-"}</span>
+          <span>แผนก: {ticket.line_user?.department || ticket.reporter_detail || "-"}</span>
           <span>หมวด: {ticket.category}</span>
           <span>ประเภท: {ticket.type}</span>
         </div>

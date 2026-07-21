@@ -93,6 +93,9 @@ class TicketOut(BaseModel):
     updated_at: datetime
     resolved_at: datetime | None = None
     line_user: LineUserOut | None = None
+    # ผู้แจ้งเคส phone-in (staff เปิดแทน ไม่มี line_user) — frontend ใช้ fallback โชว์ผู้แจ้ง
+    reporter_name: str | None = None
+    reporter_detail: str | None = None
 
 
 class TicketDetail(TicketOut):

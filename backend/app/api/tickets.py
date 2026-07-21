@@ -56,6 +56,7 @@ def list_tickets(
             | (Ticket.title.ilike(like))
             | (Ticket.description.ilike(like))
             | (LineUser.display_name.ilike(like))
+            | (Ticket.reporter_name.ilike(like))
         )
     return query.order_by(Ticket.id.desc()).limit(500).all()
 
