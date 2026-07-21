@@ -22,6 +22,9 @@ class Ticket(Base):
     ai_response: Mapped[str | None] = mapped_column(Text)
     # เลขเคสในระบบ itamtv ที่เปิดคู่ขนานไว้ — ใช้สั่งปิด/อัปเดตสถานะทีหลัง
     itamtv_job_no: Mapped[str | None] = mapped_column(String(30))
+    # ครั้งล่าสุดที่บอทตามถามความคืบหน้าจากช่างที่รับงาน (in_progress) ทาง LINE —
+    # scheduler ใช้เว้นจังหวะทุก STAFF_PROGRESS_MINUTES นาที
+    staff_progress_ping_at: Mapped[datetime | None] = mapped_column(DateTime)
     sla_policy_id: Mapped[int | None] = mapped_column(ForeignKey("sla_policies.id"))
     sla_response_due_at: Mapped[datetime | None] = mapped_column(DateTime)
     sla_resolve_due_at: Mapped[datetime | None] = mapped_column(DateTime)

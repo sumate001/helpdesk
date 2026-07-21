@@ -604,3 +604,71 @@ async def intake_turn(
             result["quantity"] = _parse_quantity(result.get("quantity"))
 
     return result
+
+
+# --------------------------------------------------------------------------
+# โหมดผู้ช่วยสำหรับ IT Staff — คุยได้ไม่จำกัด + เรียกเครื่องมือดูข้อมูล/สั่งการเคส
+# --------------------------------------------------------------------------
+
+STAFF_TOOLS = {
+    "search_tickets": "ค้นหาเคส — args: status(open|pending_approval|in_progress|resolved|closed, ไม่ใส่=ทุกสถานะ), assignee('me'=เฉพาะเคสของฉัน), query(คำค้นในหัวข้อ/รายละเอียด/เลขเคส)",
+    "get_ticket": "ดูรายละเอียดเคสเดียว — args: ticket_no (เช่น TK-20260721-0001)",
+    "list_assets": "ดูอุปกรณ์ที่พนักงานคนหนึ่งถือครอง — args: emp_code(รหัสพนักงาน) หรือ name(ชื่อ)",
+    "set_status": "เปลี่ยนสถานะเคส — args: ticket_no, status(in_progress|resolved) — sync itamtv ให้อัตโนมัติ",
+}
+
+STAFF_SYSTEM_PROMPT = """คุณเป็นผู้ช่วยส่วนตัวของเจ้าหน้าที่ IT (staff) ในระบบ Line IT Ticket
+คนที่คุยด้วยเป็นทีมงาน IT ที่ลงทะเบียนในระบบแล้ว — ตอบได้เต็มที่ ไม่ต้องจำกัดเหมือนคุยกับผู้ใช้ทั่วไป
+ตอบคำถามทั่วไป ช่วยคิด ช่วยสรุป และช่วยดู/จัดการเคสในระบบได้
+
+[เครื่องมือ]
+ถ้าต้องใช้ข้อมูลจริงจากระบบ (เคส/อุปกรณ์) หรือจะสั่งการเคส ให้ "เรียกเครื่องมือ" โดยตอบ JSON:
+{"action": "tool", "tool": "<ชื่อเครื่องมือ>", "args": {...}}
+เครื่องมือที่มี:
+%s
+ระบบจะรันเครื่องมือแล้วส่งผลลัพธ์กลับมาให้คุณในข้อความถัดไป (role=tool) — จากนั้นค่อยสรุปตอบ staff
+เรียกได้หลายครั้งต่อเนื่องถ้าจำเป็น แต่ห้ามเดาข้อมูลเคส/อุปกรณ์เองเด็ดขาด ต้องเรียกเครื่องมือดูจริง
+
+[ตอบ staff]
+เมื่อพร้อมตอบ ให้ตอบ JSON: {"action": "answer", "reply": "<ข้อความ>"}
+- ห้าม Markdown (LINE ไม่เรนเดอร์), คุยกระชับ ตรงประเด็น เป็นกันเองแบบเพื่อนร่วมทีม
+- เวลารายงานเคสหลายใบ ให้สรุปเป็นบรรทัดสั้นๆ ต่อเคส (เลขเคส-สถานะ-หัวข้อ-ผู้แจ้ง)
+- ก่อนสั่ง set_status ที่กระทบเคสจริง ถ้าไม่ชัดว่า staff สั่งเคสไหน ให้ถามยืนยันก่อน (action=answer)
+
+[งานเสร็จ]
+บอทตามถามความคืบหน้างานที่ staff รับไว้เป็นระยะ ถ้า staff บอกว่า "เสร็จแล้ว/ปิดได้/จบงาน":
+- ถ้ารู้ชัดว่าเคสไหน → ถามยืนยันปิดก่อน เช่น "ปิดเคส TK-... เลยไหมครับ" (action=answer)
+  staff ยืนยัน → เรียก set_status(status=resolved). staff จะกดปุ่มปิดจากการ์ดเองก็ได้
+- ถ้าไม่รู้ว่าเคสไหน → เรียก search_tickets(assignee='me', status='in_progress') หาเคสที่ค้างอยู่ก่อน
+  มีใบเดียวก็ยืนยันปิดใบนั้น หลายใบให้ถามว่าใบไหน
+
+ทุกคำตอบต้องเป็น JSON ตามรูปแบบข้างบนเท่านั้น ไม่มีข้อความนอก JSON"""
+
+
+def _staff_system() -> str:
+    tools = "\n".join(f"- {k}: {v}" for k, v in STAFF_TOOLS.items())
+    return STAFF_SYSTEM_PROMPT % tools
+
+
+async def staff_turn(history: list[dict]) -> dict:
+    """เดินผู้ช่วย staff หนึ่ง turn. history = [{role, content}, ...] โดย role เป็น
+    user(staff) / assistant(บอท) / tool(ผลลัพธ์เครื่องมือที่ webhook เติมกลับเข้ามา).
+
+    คืน dict:
+      {"action": "tool", "tool": ..., "args": {...}}  → webhook รันเครื่องมือแล้วเรียกซ้ำ
+      {"action": "answer", "reply": ...}              → ส่งข้อความให้ staff แล้วจบ
+    """
+    try:
+        raw = await _ollama_chat_messages(_staff_system(), history)
+        result = _parse_json(raw)
+    except (httpx.HTTPError, json.JSONDecodeError, KeyError) as exc:
+        logger.warning("AI staff turn failed: %s", exc)
+        return {"action": "answer",
+                "reply": "ตอนนี้ผู้ช่วยขัดข้องชั่วคราวครับ ลองใหม่อีกทีนะครับ 🙏"}
+
+    if result.get("action") == "tool" and result.get("tool") in STAFF_TOOLS:
+        args = result.get("args")
+        return {"action": "tool", "tool": result["tool"],
+                "args": args if isinstance(args, dict) else {}}
+    reply = result.get("reply") or "รับทราบครับ มีอะไรให้ช่วยอีกไหมครับ"
+    return {"action": "answer", "reply": clean_for_line(reply)}

@@ -169,6 +169,94 @@ def close_case_flex(ticket_no: str, ticket_id: int, summary: str) -> dict:
     }
 
 
+def work_case_flex(ticket_no: str, ticket_id: int, summary: str, status_th: str) -> dict:
+    """Flex bubble แจ้ง staff ว่ามีงานเข้า พร้อมปุ่มปรับสถานะครบ workflow.
+
+    ปุ่มพก action ต่างกันใน postback.data → webhook `_handle_postback` แยกจัดการ:
+    รับงาน (accept → in_progress + assign) / ปิดเคส (close_case → resolved).
+    """
+    def _btn(label: str, action: str, color: str) -> dict:
+        return {
+            "type": "button",
+            "style": "primary",
+            "color": color,
+            "height": "sm",
+            "action": {
+                "type": "postback",
+                "label": label,
+                "data": f"action={action}&ticket_id={ticket_id}",
+                "displayText": f"{label} {ticket_no}",
+            },
+        }
+
+    return {
+        "type": "flex",
+        "altText": f"งานใหม่ {ticket_no}",
+        "contents": {
+            "type": "bubble",
+            "body": {
+                "type": "box",
+                "layout": "vertical",
+                "spacing": "sm",
+                "contents": [
+                    {"type": "text", "text": f"🎫 {ticket_no}", "weight": "bold", "size": "lg"},
+                    {"type": "text", "text": summary, "size": "sm", "wrap": True, "color": "#555555"},
+                    {"type": "text", "text": f"สถานะ: {status_th}", "size": "xs", "color": "#888888"},
+                ],
+            },
+            "footer": {
+                "type": "box",
+                "layout": "vertical",
+                "spacing": "sm",
+                "contents": [
+                    _btn("รับงาน 🙋", "accept_case", "#3b82f6"),
+                    _btn("ปิดเคส ✅", "close_case", "#22c55e"),
+                ],
+            },
+        },
+    }
+
+
+def progress_case_flex(ticket_no: str, ticket_id: int, summary: str) -> dict:
+    """Flex ตามถามความคืบหน้าจากช่างที่รับงาน + ปุ่มปิดเคสในตัว (เสร็จแล้วกดปิดได้เลย)."""
+    return {
+        "type": "flex",
+        "altText": f"คืบหน้าถึงไหนแล้ว {ticket_no}",
+        "contents": {
+            "type": "bubble",
+            "body": {
+                "type": "box",
+                "layout": "vertical",
+                "spacing": "sm",
+                "contents": [
+                    {"type": "text", "text": f"🎫 {ticket_no}", "weight": "bold", "size": "lg"},
+                    {"type": "text", "text": summary, "size": "sm", "wrap": True, "color": "#555555"},
+                    {"type": "text", "text": "งานคืบหน้าถึงไหนแล้วครับ? เสร็จแล้วกดปิดได้เลย 👇",
+                     "size": "sm", "wrap": True, "color": "#888888"},
+                ],
+            },
+            "footer": {
+                "type": "box",
+                "layout": "vertical",
+                "contents": [
+                    {
+                        "type": "button",
+                        "style": "primary",
+                        "color": "#22c55e",
+                        "height": "sm",
+                        "action": {
+                            "type": "postback",
+                            "label": "ปิดเคส ✅",
+                            "data": f"action=close_case&ticket_id={ticket_id}",
+                            "displayText": f"ปิดเคส {ticket_no}",
+                        },
+                    }
+                ],
+            },
+        },
+    }
+
+
 async def push_flex(to: str, flex: dict) -> list[str]:
     return await _post("/message/push", {"to": to, "messages": [flex]})
 

@@ -10,6 +10,7 @@ class SettingsOut(BaseModel):
     RAG_TOP_K: int
     RAG_MIN_SIMILARITY: float
     FOLLOWUP_ENABLED: bool  # สวิตช์ follow-up flow (ถามซ้ำ/เปิด ticket อัตโนมัติเมื่อผู้ใช้เงียบ)
+    STAFF_PROGRESS_ENABLED: bool  # สวิตช์ตามถามความคืบหน้าจากช่างที่รับงานทาง LINE
     TICKET_CONFIRM_REQUIRED: bool  # ต้องกดยืนยันก่อนเปิด ticket ไหม (ปิด = เปิดเคสทันทีเมื่อข้อมูลครบ)
     ITAMTV_ENABLED: bool  # เปิดเคสคู่ขนาน + sync สถานะกับ itamtv
     EMPLOYEE_LOOKUP_ENABLED: bool  # ลงทะเบียน/ดึงข้อมูลพนักงานจาก Employee DB
@@ -26,6 +27,7 @@ class SettingsUpdate(BaseModel):
     RAG_TOP_K: int | None = Field(default=None, ge=1, le=20)
     RAG_MIN_SIMILARITY: float | None = Field(default=None, ge=0.0, le=1.0)
     FOLLOWUP_ENABLED: bool | None = None
+    STAFF_PROGRESS_ENABLED: bool | None = None
     TICKET_CONFIRM_REQUIRED: bool | None = None
     ITAMTV_ENABLED: bool | None = None
     EMPLOYEE_LOOKUP_ENABLED: bool | None = None

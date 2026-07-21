@@ -63,11 +63,17 @@ class Settings(BaseSettings):
     # เปิด/ปิดสดได้จากหน้า Settings (override ใน DB) — ค่านี้เป็นค่าตั้งต้น
     FOLLOWUP_ENABLED: bool = True
 
+    # ตามถามความคืบหน้าจากช่างที่รับงาน (in_progress) ทาง LINE เป็นระยะ
+    # เปิด/ปิดสดได้จากหน้า Settings (override ใน DB) — ค่านี้เป็นค่าตั้งต้น
+    STAFF_PROGRESS_ENABLED: bool = True
+
     # ต้องให้ผู้ใช้กดยืนยันก่อนเปิด ticket ไหม — ปิดแล้วบอทเปิดเคสทันทีเมื่อข้อมูลครบ
     # เปิด/ปิดสดได้จากหน้า Settings (override ใน DB) — ค่านี้เป็นค่าตั้งต้น
     TICKET_CONFIRM_REQUIRED: bool = True
     FOLLOWUP_DELAY_MINUTES: int = 10
     ESCALATE_DELAY_MINUTES: int = 30
+    # ช่างรับงาน (in_progress) แล้วบอทตามถามความคืบหน้าทาง LINE ทุกกี่นาที
+    STAFF_PROGRESS_MINUTES: int = 15
 
     # คำขึ้นต้นที่ใช้เรียกบอทในกลุ่ม (คั่นด้วย comma) — ใช้แทน/ร่วมกับการ @ mention
     GROUP_TRIGGER_KEYWORDS: str = "itadmin,@itadmin,/itadmin"

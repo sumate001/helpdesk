@@ -23,6 +23,12 @@ def _followup_job() -> None:
     run_followup_tick()
 
 
+def _staff_progress_job() -> None:
+    from app.services.followup_service import run_staff_progress_tick
+
+    run_staff_progress_tick()
+
+
 def _sla_job() -> None:
     from app.core.database import SessionLocal
     from app.services.sla_service import check_breaches
@@ -54,6 +60,15 @@ def start_scheduler() -> None:
         "interval",
         minutes=1,
         id="followup_tick",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+    )
+    scheduler.add_job(
+        _staff_progress_job,
+        "interval",
+        minutes=1,
+        id="staff_progress_tick",
         replace_existing=True,
         max_instances=1,
         coalesce=True,

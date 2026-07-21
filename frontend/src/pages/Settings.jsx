@@ -100,6 +100,7 @@ export default function Settings() {
       [...MODEL_FIELDS, ...NUM_FIELDS].forEach((x) => (f[x.key] = String(data[x.key])));
       f.OLLAMA_BASE_URL = data.OLLAMA_BASE_URL;
       f.FOLLOWUP_ENABLED = data.FOLLOWUP_ENABLED;
+      f.STAFF_PROGRESS_ENABLED = data.STAFF_PROGRESS_ENABLED;
       f.TICKET_CONFIRM_REQUIRED = data.TICKET_CONFIRM_REQUIRED;
       setForm(f);
       loadIntegrations();
@@ -129,6 +130,7 @@ export default function Settings() {
       MODEL_FIELDS.forEach((f) => (payload[f.key] = form[f.key]));
       NUM_FIELDS.forEach((f) => (payload[f.key] = Number(form[f.key])));
       payload.FOLLOWUP_ENABLED = !!form.FOLLOWUP_ENABLED;
+      payload.STAFF_PROGRESS_ENABLED = !!form.STAFF_PROGRESS_ENABLED;
       payload.TICKET_CONFIRM_REQUIRED = !!form.TICKET_CONFIRM_REQUIRED;
       const { data } = await api.patch("/settings", payload);
       setData(data);
@@ -146,7 +148,9 @@ export default function Settings() {
       setForm((f) => ({
         ...f,
         [key]:
-          key === "FOLLOWUP_ENABLED" || key === "TICKET_CONFIRM_REQUIRED"
+          key === "FOLLOWUP_ENABLED" ||
+          key === "STAFF_PROGRESS_ENABLED" ||
+          key === "TICKET_CONFIRM_REQUIRED"
             ? data[key]
             : String(data[key]),
       }));
@@ -411,6 +415,40 @@ export default function Settings() {
               onChange={(e) => setForm({ ...form, FOLLOWUP_ENABLED: e.target.checked })}
             />
             {form.FOLLOWUP_ENABLED ? "เปิดใช้งาน" : "ปิดอยู่"}
+          </label>
+        </div>
+
+        {/* 4b. Staff progress follow-up toggle */}
+        <div>
+          <div className="flex items-center gap-2">
+            <label className="font-medium text-sm text-slate-100">
+              ตามงานช่างอัตโนมัติ
+            </label>
+            <OverrideTag k="STAFF_PROGRESS_ENABLED" />
+            {overridden.has("STAFF_PROGRESS_ENABLED") && (
+              <button
+                type="button"
+                onClick={() => resetField("STAFF_PROGRESS_ENABLED")}
+                className="text-xs text-slate-400 hover:text-slate-200 hover:underline ml-auto"
+              >
+                คืนค่าตั้งต้น
+              </button>
+            )}
+          </div>
+          <p className="text-xs text-slate-500 mt-0.5 mb-1.5">
+            ช่างรับงานแล้ว (in_progress) → บอททักถามความคืบหน้าทาง LINE ทุก 15 นาที
+            พร้อมปุ่มปิดเคส จนกว่าจะปิดงาน — ปิดสวิตช์นี้เพื่อหยุดการทัก
+          </p>
+          <label className="flex items-center gap-2 text-sm text-slate-200 cursor-pointer w-fit">
+            <input
+              type="checkbox"
+              className="accent-indigo-500 w-4 h-4"
+              checked={!!form.STAFF_PROGRESS_ENABLED}
+              onChange={(e) =>
+                setForm({ ...form, STAFF_PROGRESS_ENABLED: e.target.checked })
+              }
+            />
+            {form.STAFF_PROGRESS_ENABLED ? "เปิดใช้งาน" : "ปิดอยู่"}
           </label>
         </div>
 

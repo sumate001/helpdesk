@@ -175,15 +175,12 @@ async def _handle_postback(db: Session, line_user_id: str, event: dict) -> None:
     """ช่างกดปุ่มปิดเคสจาก LINE → ตรวจสิทธิ์ → ปิด ticket + ปิดเคสใน itamtv."""
     data = _parse_postback((event.get("postback") or {}).get("data", ""))
     reply_token = event.get("replyToken")
-    if data.get("action") != "close_case":
+    action = data.get("action")
+    if action not in ("close_case", "accept_case"):
         return
 
     # ยืนยันตัวตน: คนกดต้องเป็น IT staff ที่ผูก LINE ไว้ (users.line_user_id)
-    staff = (
-        db.query(User)
-        .filter(User.line_user_id == line_user_id, User.is_active.is_(True))
-        .one_or_none()
-    )
+    staff = _resolve_staff(db, line_user_id)
     if staff is None:
         await _reply(db, reply_token, "ปุ่มนี้ใช้ได้เฉพาะเจ้าหน้าที่ IT ที่ลงทะเบียนไว้ครับ")
         return
@@ -196,39 +193,40 @@ async def _handle_postback(db: Session, line_user_id: str, event: dict) -> None:
         await _reply(db, reply_token, f"เคส {ticket.ticket_no} ปิดไปแล้วครับ ✅")
         return
 
-    # ปิดฝั่ง dashboard ก่อนเสมอ (แหล่งความจริงหลักของเรา)
-    ticket.status = "resolved"
-    ticket.resolved_at = datetime.now(timezone.utc)
-    if ticket.assigned_to is None:
-        ticket.assigned_to = staff.id
-    db.add(TicketComment(ticket_id=ticket.id, user_id=staff.id,
-                         content=f"ปิดเคสผ่าน LINE โดย {staff.display_name or staff.username}",
-                         is_internal=True))
-    db.commit()
+    if action == "accept_case":
+        note = await _apply_ticket_status(db, ticket, staff, "in_progress")
+        await _reply(db, reply_token,
+                     f"รับงานเคส {ticket.ticket_no} แล้วครับ 🙋 (กำลังดำเนินการ){note}")
+        return
 
-    # ปิดคู่ขนานใน itamtv ด้วยสิทธิ์ช่างคนที่กดปุ่ม (token + emp code ของเขา)
-    itamtv_note = ""
-    if ticket.itamtv_job_no:
+    # close_case → ปิดฝั่ง dashboard + itamtv ด้วยสิทธิ์ช่างคนที่กดปุ่ม
+    note = await _apply_ticket_status(db, ticket, staff, "resolved")
+    await _reply(db, reply_token, f"ปิดเคส {ticket.ticket_no} เรียบร้อยครับ ✅{note}")
+
+
+async def notify_staff_new_ticket(db: Session, ticket: Ticket) -> None:
+    """มีเคสใหม่เข้ามา → ส่งการ์ดงาน (ปุ่มรับงาน/ปิดเคส) ไปหา staff ทุกคนที่ผูก LINE ไว้.
+
+    ใครก็กด 'รับงาน' ได้ → กลายเป็นผู้รับผิดชอบ (assign) + in_progress. best-effort:
+    ส่งไม่ได้ทีละคนก็ข้าม ไม่ให้กระทบการเปิดเคส.
+    """
+    staffs = (
+        db.query(User)
+        .filter(User.is_active.is_(True), User.line_user_id.isnot(None))
+        .all()
+    )
+    if not staffs:
+        return
+    flex = line_service.work_case_flex(
+        ticket.ticket_no, ticket.id,
+        ticket.title or ticket.description or "-",
+        ticket_service.STATUS_LABELS_TH.get(ticket.status, ticket.status),
+    )
+    for staff in staffs:
         try:
-            if not staff.itamtv_token:
-                raise RuntimeError("บัญชีช่างยังไม่ได้ผูก itamtv token (ตั้งในหน้า Users)")
-            msg = await itamtv_service.complete_case(
-                ticket.itamtv_job_no,
-                token=staff.itamtv_token,
-                people_code=staff.itamtv_emp_code,
-                note=f"ปิดโดย {staff.display_name or staff.username} ผ่าน LINE",
-            )
-            itamtv_note = f"\nitamtv: {msg}"
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("itamtv complete failed for %s: %s", ticket.ticket_no, exc)
-            db.add(TicketComment(
-                ticket_id=ticket.id, user_id=staff.id, is_internal=True,
-                content=f"⚠️ ปิดใน itamtv อัตโนมัติไม่ได้ ({exc}) — รบกวนปิดในระบบเองด้วยครับ",
-            ))
-            db.commit()
-            itamtv_note = "\n(⚠️ ปิดใน itamtv อัตโนมัติไม่ได้ รบกวนปิดในระบบเองด้วยครับ)"
-
-    await _reply(db, reply_token, f"ปิดเคส {ticket.ticket_no} เรียบร้อยครับ ✅{itamtv_note}")
+            await line_service.push_flex(staff.line_user_id, flex)
+        except Exception:  # noqa: BLE001
+            logger.exception("push งานใหม่ให้ staff %s ไม่สำเร็จ", staff.username)
 
 
 async def notify_staff_close(db: Session, ticket: Ticket) -> bool:
@@ -427,12 +425,183 @@ async def _try_register(db: Session, lu: LineUser, text: str, reply_token: str) 
     if emp.get("floor"):
         lu.floor = str(emp["floor"])[:20]
     db.commit()
+    _maybe_link_staff(db, lu)
     dept = f" ({emp['department']})" if emp.get("department") else ""
     await _reply(db, reply_token,
                  f"เรียบร้อยครับ ✅ สวัสดีคุณ{emp['name']}{dept}\n"
                  "ต่อไปมีปัญหา IT ทักมาได้เลย ไม่ต้องแนะนำตัวใหม่แล้วครับ 🙌\n"
                  "(ถ้าข้อมูลไม่ตรง พิมพ์รหัสพนักงานหรืออีเมลใหม่มาได้เลยครับ)")
     return True
+
+
+def _resolve_staff(db: Session, line_user_id: str) -> User | None:
+    """คน LINE นี้เป็น IT staff ที่ผูกบัญชีไว้ไหม → คืน User (active) หรือ None."""
+    return (
+        db.query(User)
+        .filter(User.line_user_id == line_user_id, User.is_active.is_(True))
+        .one_or_none()
+    )
+
+
+def _maybe_link_staff(db: Session, lu: LineUser) -> None:
+    """ผูก LINE ↔ staff อัตโนมัติหลังลงทะเบียน: ถ้ามี users ที่ email/emp_code ตรงกับ
+    พนักงานคนนี้และยังไม่ผูก LINE → เซ็ต users.line_user_id ให้ (พนักงานที่เป็น staff
+    พอลงทะเบียนเสร็จก็เข้าโหมดผู้ช่วย staff ได้ทันที ไม่ต้องตั้งมือในหน้า Users)."""
+    conds = []
+    if lu.emp_email:
+        conds.append(User.email == lu.emp_email)
+    if lu.emp_code:
+        conds.append(User.itamtv_emp_code == lu.emp_code)
+    if not conds:
+        return
+    from sqlalchemy import or_
+
+    staff = (
+        db.query(User)
+        .filter(User.is_active.is_(True), or_(*conds))
+        .order_by(User.id)
+        .first()
+    )
+    if staff is None:
+        return
+    if staff.line_user_id and staff.line_user_id != lu.line_user_id:
+        # user นี้ผูก LINE อื่นอยู่แล้ว — ไม่แย่งผูก กันสลับตัวโดยไม่ตั้งใจ
+        logger.info("staff %s ผูก LINE อื่นอยู่แล้ว ข้าม auto-link", staff.username)
+        return
+    if staff.line_user_id != lu.line_user_id:
+        staff.line_user_id = lu.line_user_id
+        db.commit()
+        logger.info("auto-link staff %s ↔ LINE %s", staff.username, lu.line_user_id)
+
+
+async def _apply_ticket_status(
+    db: Session, ticket: Ticket, staff: User, target: str
+) -> str:
+    """เปลี่ยนสถานะ ticket ฝั่ง dashboard + sync itamtv ด้วยสิทธิ์ช่างคนที่สั่ง.
+
+    target ∈ {in_progress, resolved}. คืนข้อความหมายเหตุผล itamtv (อาจว่าง).
+    ใช้ร่วมกันทั้งปุ่ม postback และเครื่องมือ set_status ของผู้ช่วย staff.
+    """
+    ticket.status = target
+    if ticket.assigned_to is None:
+        ticket.assigned_to = staff.id
+    if target == "resolved":
+        ticket.resolved_at = datetime.now(timezone.utc)
+    db.add(TicketComment(
+        ticket_id=ticket.id, user_id=staff.id, is_internal=True,
+        content=f"เปลี่ยนสถานะเป็น {ticket.status} ผ่าน LINE โดย {staff.display_name or staff.username}",
+    ))
+    db.commit()
+
+    if not ticket.itamtv_job_no:
+        return ""
+    itamtv_target = itamtv_service.STATUS_TO_ITAMTV.get(target)
+    if itamtv_target is None:
+        return ""
+    try:
+        if not staff.itamtv_token:
+            raise RuntimeError("บัญชีช่างยังไม่ได้ผูก itamtv token (ตั้งในหน้า Users)")
+        msg = await itamtv_service.set_status(
+            ticket.itamtv_job_no, token=staff.itamtv_token, target=itamtv_target,
+            people_code=staff.itamtv_emp_code,
+            note=f"อัปเดตโดย {staff.display_name or staff.username} ผ่าน LINE",
+        )
+        return f"\nitamtv: {msg}"
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("itamtv set_status failed for %s: %s", ticket.ticket_no, exc)
+        db.add(TicketComment(
+            ticket_id=ticket.id, user_id=staff.id, is_internal=True,
+            content=f"⚠️ อัปเดตสถานะใน itamtv อัตโนมัติไม่ได้ ({exc}) — รบกวนทำในระบบเองด้วยครับ",
+        ))
+        db.commit()
+        return "\n(⚠️ อัปเดตใน itamtv อัตโนมัติไม่ได้ รบกวนทำในระบบเองด้วยครับ)"
+
+
+async def _staff_run_tool(db: Session, staff: User, tool: str, args: dict) -> str:
+    """รันเครื่องมือที่ผู้ช่วย staff เรียก → คืนผลลัพธ์เป็นข้อความ (ป้อนกลับให้ AI สรุป)."""
+    import json as _json
+
+    if tool == "search_tickets":
+        assignee_id = staff.id if str(args.get("assignee", "")).lower() == "me" else None
+        rows = ticket_service.search_tickets(
+            db, status=args.get("status") or None,
+            assignee_id=assignee_id, query=args.get("query") or None,
+        )
+        return _json.dumps({"tickets": rows}, ensure_ascii=False)
+
+    if tool == "get_ticket":
+        t = ticket_service.get_by_no(db, str(args.get("ticket_no", "")))
+        if t is None:
+            return _json.dumps({"error": "ไม่พบเคสนี้"}, ensure_ascii=False)
+        return _json.dumps(ticket_service._ticket_dict(t), ensure_ascii=False)
+
+    if tool == "list_assets":
+        emp = None
+        try:
+            if args.get("emp_code"):
+                emp = await itamtv_service.lookup_employee_exact(emp_code=str(args["emp_code"]))
+            elif args.get("name"):
+                emp = await itamtv_service.lookup_employee(str(args["name"]))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("list_assets lookup failed: %s", exc)
+            return _json.dumps({"error": "ต่อกับระบบพนักงานไม่ติด"}, ensure_ascii=False)
+        if not emp:
+            return _json.dumps({"error": "หาพนักงานคนนี้ไม่เจอ"}, ensure_ascii=False)
+        try:
+            assets = await itamtv_service.fetch_assets(emp["id"])
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("fetch_assets failed: %s", exc)
+            return _json.dumps({"error": "ดึงข้อมูลอุปกรณ์ไม่สำเร็จ"}, ensure_ascii=False)
+        return _json.dumps({
+            "employee": emp.get("name"),
+            "assets": itamtv_service.asset_summary(assets) or "ไม่มีอุปกรณ์ในระบบ",
+        }, ensure_ascii=False)
+
+    if tool == "set_status":
+        target = str(args.get("status", "")).strip()
+        if target not in ("in_progress", "resolved"):
+            return _json.dumps({"error": "status ต้องเป็น in_progress หรือ resolved"},
+                               ensure_ascii=False)
+        t = ticket_service.get_by_no(db, str(args.get("ticket_no", "")))
+        if t is None:
+            return _json.dumps({"error": "ไม่พบเคสนี้"}, ensure_ascii=False)
+        note = await _apply_ticket_status(db, t, staff, target)
+        return _json.dumps({
+            "ok": True, "ticket_no": t.ticket_no, "status": t.status, "itamtv": note.strip(),
+        }, ensure_ascii=False)
+
+    return _json.dumps({"error": "ไม่รู้จักเครื่องมือนี้"}, ensure_ascii=False)
+
+
+async def _run_staff_assistant(
+    db: Session, staff: User, reply_token: str, text: str
+) -> None:
+    """โหมดผู้ช่วยสำหรับ IT staff — คุยได้ไม่จำกัด + เรียกเครื่องมือดูข้อมูล/สั่งการเคส.
+
+    วนเรียก ai_service.staff_turn: ถ้า action=tool → รันเครื่องมือ เติมผลลัพธ์เข้า history
+    แล้วเรียกซ้ำ (จำกัดรอบกัน loop) จนกว่าจะได้ action=answer → ตอบ staff.
+    """
+    import json
+
+    history: list[dict] = [{"role": "user", "content": text.strip() or "-"}]
+    for _ in range(5):
+        result = await ai_service.staff_turn(history)
+        if result["action"] == "answer":
+            await _reply(db, reply_token, result["reply"])
+            return
+        # action == "tool" → บันทึกคำสั่งที่ AI เรียกไว้ใน history ให้มันเห็นบริบทรอบถัดไป
+        history.append({
+            "role": "assistant",
+            "content": json.dumps(
+                {"action": "tool", "tool": result["tool"], "args": result["args"]},
+                ensure_ascii=False,
+            ),
+        })
+        tool_out = await _staff_run_tool(db, staff, result["tool"], result["args"])
+        history.append({"role": "tool", "content": tool_out})
+    # เรียกเครื่องมือวนเกินลิมิต → บอกให้ลองใหม่ (กันค้าง)
+    await _reply(db, reply_token,
+                 "ขอโทษครับ ผมประมวลผลคำขอนี้ไม่จบ ลองถามใหม่แบบเจาะจงขึ้นได้ไหมครับ 🙏")
 
 
 def _create_ticket_from_intake(
@@ -543,6 +712,8 @@ async def _run_intake(
     if not is_approval:
         # เคสซ่อม/แก้ไข → เปิดคู่ขนานใน itamtv + แนบข้อมูลเครื่องผู้แจ้ง (best-effort)
         await itamtv_service.mirror_ticket(db, ticket, lu)
+        # แจ้ง staff ที่ผูก LINE ให้รู้ว่ามีงานเข้า + กดรับงาน/ปิดเคสได้จาก LINE
+        await notify_staff_new_ticket(db, ticket)
     if is_approval:
         tail = "ส่งให้ทีม IT พิจารณาอนุมัติแล้วนะครับ มีความคืบหน้าจะรีบแจ้งครับ 🙏"
     else:
@@ -582,7 +753,14 @@ async def _handle_user_text(
     conv = conversation_service.get_active(db, "user", None, line_user_id)
 
     # นอกบทสนทนา + ข้อความหน้าตาเป็นรหัสพนักงาน/อีเมล → ลงทะเบียน/แก้การผูกพนักงาน
+    # (ทำก่อนเช็ก staff เพราะเป็นทางที่ auto-link บัญชี staff เข้ากับ LINE)
     if conv is None and await _try_register(db, lu, text, reply_token):
+        return
+
+    # IT staff ที่ผูกบัญชีไว้ → โหมดผู้ช่วยไม่จำกัด (ไม่เข้า flow แจ้งปัญหาของ user ทั่วไป)
+    staff = _resolve_staff(db, line_user_id)
+    if staff is not None:
+        await _run_staff_assistant(db, staff, reply_token, text)
         return
 
     # ไม่มีบทสนทนา + เป็นปุ่ม follow-up เดิม → จัดการแบบเดิม (ticket ที่เปิดค้างไว้)

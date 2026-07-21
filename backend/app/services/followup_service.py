@@ -16,8 +16,10 @@ from app.core.config import settings
 from app.core.database import SessionLocal
 from app.models.conversation import Conversation
 from app.models.line_user import LineUser
+from app.models.ticket import Ticket
 from app.models.ticket_attachment import TicketAttachment
 from app.models.ticket_followup import TicketFollowup
+from app.models.user import User
 from app.services import itamtv_service, line_service, settings_service, ticket_service
 
 logger = logging.getLogger(__name__)
@@ -58,6 +60,54 @@ def run_followup_tick() -> None:
         logger.exception("followup tick error")
     finally:
         db.close()
+
+
+def run_staff_progress_tick() -> None:
+    """เรียกโดย scheduler ทุกนาที — ตามถามความคืบหน้าจากช่างที่รับงานค้างไว้.
+
+    เคย in_progress + มีผู้รับผิดชอบที่ผูก LINE + ครบ STAFF_PROGRESS_MINUTES นาที
+    ตั้งแต่ ping ล่าสุด (หรือตั้งแต่รับงานถ้ายังไม่เคย ping) → push การ์ดถามคืบหน้า
+    พร้อมปุ่มปิดเคส. เสร็จแล้ว staff กดปุ่มปิด/บอกบอทให้ปิดได้เลย.
+
+    เปิด/ปิดทั้ง flow ได้สดๆ ผ่าน setting STAFF_PROGRESS_ENABLED (หน้า Settings).
+    """
+    if not settings_service.get("STAFF_PROGRESS_ENABLED"):
+        return
+    db = SessionLocal()
+    try:
+        _process_staff_progress(db)
+    except Exception:  # noqa: BLE001
+        logger.exception("staff progress tick error")
+    finally:
+        db.close()
+
+
+def _process_staff_progress(db: Session) -> None:
+    threshold = _now() - timedelta(minutes=settings.STAFF_PROGRESS_MINUTES)
+    rows = (
+        db.query(Ticket, User)
+        .join(User, Ticket.assigned_to == User.id)
+        .filter(
+            Ticket.status == "in_progress",
+            User.is_active.is_(True),
+            User.line_user_id.isnot(None),
+        )
+        .all()
+    )
+    for ticket, staff in rows:
+        # เทียบกับ ping ล่าสุด — ยังไม่เคย ping ให้อิงเวลา updated_at (ตอนเปลี่ยนเป็น in_progress)
+        last = ticket.staff_progress_ping_at or ticket.updated_at
+        if last and last.tzinfo is None:
+            last = last.replace(tzinfo=timezone.utc)
+        if last and last > threshold:
+            continue
+        flex = line_service.progress_case_flex(
+            ticket.ticket_no, ticket.id, ticket.title or ticket.description or "-"
+        )
+        asyncio.run(line_service.push_flex(staff.line_user_id, flex))
+        ticket.staff_progress_ping_at = _now()
+        db.commit()
+        logger.info("staff progress ping sent for %s → %s", ticket.ticket_no, staff.username)
 
 
 def _silent_conversations(db: Session, minutes: int, followed_up: bool) -> list[Conversation]:

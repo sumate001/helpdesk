@@ -117,6 +117,57 @@ def recent_tickets(db: Session, line_user_db_id: int, limit: int = 5) -> list[di
     ]
 
 
+def _ticket_dict(t: Ticket) -> dict:
+    """สรุป ticket หนึ่งใบเป็น dict ให้ staff assistant อ่าน (มีชื่อผู้แจ้ง/ผู้ดูแล)."""
+    lu = t.line_user
+    return {
+        "ticket_no": t.ticket_no,
+        "title": t.title,
+        "category": t.category,
+        "priority": t.priority,
+        "status": t.status,
+        "status_th": STATUS_LABELS_TH.get(t.status, t.status),
+        "reporter": (lu.emp_name or lu.display_name) if lu else None,
+        "department": (lu.department if lu else None),
+        "assignee": t.assignee.display_name if t.assignee else None,
+        "description": _brief(t.description or t.title or "", 300),
+        "created_at": t.created_at.strftime("%d/%m/%Y %H:%M") if t.created_at else None,
+        "resolved_at": t.resolved_at.strftime("%d/%m/%Y %H:%M") if t.resolved_at else None,
+    }
+
+
+def search_tickets(
+    db: Session,
+    status: str | None = None,
+    assignee_id: int | None = None,
+    query: str | None = None,
+    limit: int = 10,
+) -> list[dict]:
+    """ค้น ticket ให้โหมดผู้ช่วย staff — filter สถานะ/ผู้ดูแล/คำค้น (title+description+เลขเคส)."""
+    q = db.query(Ticket)
+    if status:
+        q = q.filter(Ticket.status == status)
+    if assignee_id is not None:
+        q = q.filter(Ticket.assigned_to == assignee_id)
+    if query:
+        like = f"%{query.strip()}%"
+        q = q.filter(
+            Ticket.title.ilike(like)
+            | Ticket.description.ilike(like)
+            | Ticket.ticket_no.ilike(like)
+        )
+    rows = q.order_by(Ticket.id.desc()).limit(limit).all()
+    return [_ticket_dict(t) for t in rows]
+
+
+def get_by_no(db: Session, ticket_no: str) -> Ticket | None:
+    return (
+        db.query(Ticket)
+        .filter(Ticket.ticket_no.ilike(ticket_no.strip()))
+        .one_or_none()
+    )
+
+
 def _brief(text: str, limit: int = 500) -> str:
     """ตัดรายละเอียดให้พอดีกับ notify — ตัดเฉพาะเมื่อยาวเกินจริง + ใส่ … บอกว่ามีต่อ."""
     text = text or ""
