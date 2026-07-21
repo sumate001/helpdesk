@@ -13,6 +13,12 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _now_naive() -> datetime:
+    """UTC now แบบ naive — ใช้เทียบกับคอลัมน์ expires_at (timestamp without tz) ใน SQL
+    ให้เป็น type เดียวกัน กันปัญหา naive/aware."""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
 def _aware(dt: datetime) -> datetime:
     return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
@@ -25,13 +31,17 @@ def get_active(
     db: Session, channel: str, source_id: str | None, line_user_id: str
 ) -> Conversation | None:
     """คืน conversation ที่ยัง active และไม่หมดอายุ — ที่หมดอายุจะปิดทิ้ง."""
-    # ปิด conversation ที่หมดอายุก่อน
+    # ปิด conversation ที่หมดอายุก่อน — synchronize_session=False ให้เทียบใน SQL ล้วน
+    # (ถ้าปล่อยให้ SQLAlchemy sync ฝั่ง Python จะเทียบ expires_at (naive) กับ _now() (aware)
+    #  แล้ว TypeError เมื่อมี Conversation object ค้างอยู่ใน session)
     db.execute(
         update(Conversation)
-        .where(Conversation.status == "active", Conversation.expires_at < _now())
+        .where(Conversation.status == "active", Conversation.expires_at < _now_naive())
         .values(status="closed")
+        .execution_options(synchronize_session=False)
     )
     db.commit()
+    db.expire_all()  # object ที่เพิ่งโดนปิดใน DB → ให้ reload สถานะใหม่รอบ query ถัดไป
     return (
         db.query(Conversation)
         .filter(
