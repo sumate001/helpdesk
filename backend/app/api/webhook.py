@@ -757,9 +757,15 @@ async def _handle_user_text(
 
     conv = conversation_service.get_active(db, "user", None, line_user_id)
 
-    # นอกบทสนทนา + ข้อความหน้าตาเป็นรหัสพนักงาน/อีเมล → ลงทะเบียน/แก้การผูกพนักงาน
+    # ข้อความหน้าตาเป็นรหัสพนักงาน/อีเมล → ลงทะเบียน/แก้การผูกพนักงาน
     # (ทำก่อนเช็ก staff เพราะเป็นทางที่ auto-link บัญชี staff เข้ากับ LINE)
-    if conv is None and await _try_register(db, lu, text, reply_token):
+    # ปกติทำเฉพาะนอกบทสนทนา แต่ถ้ายังไม่เคยลงทะเบียน (employee_id ว่าง) ให้จับรหัส/อีเมล
+    # ได้แม้มีบทสนทนาค้าง — กันเคสผู้ใช้พิมพ์ "ลงทะเบียน" (เปิด conv) แล้วค่อยส่งรหัสตามมา
+    # (โค้ด 90004 จะถูกกลืนเข้า intake ไม่งั้น). จำกัดไว้ที่ยังไม่ลงทะเบียนเพื่อกัน false
+    # positive ตอนผู้ใช้ที่ลงทะเบียนแล้วพิมพ์ตัวเลข (เช่น Asset Tag) ระหว่าง troubleshoot
+    if (conv is None or lu.employee_id is None) and await _try_register(
+        db, lu, text, reply_token
+    ):
         return
 
     # IT staff ที่ผูกบัญชีไว้ → โหมดผู้ช่วยไม่จำกัด (ไม่เข้า flow แจ้งปัญหาของ user ทั่วไป)
