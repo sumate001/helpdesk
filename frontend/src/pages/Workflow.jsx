@@ -102,6 +102,18 @@ const JOBS = [
   { every: "ทุก 3 นาที", name: "ซิงก์ itamtv", desc: "ช่างปิดงานในระบบเดิม → สถานะที่นี่ตามให้อัตโนมัติ" },
 ];
 
+/* เอกสารให้โหลด — ไฟล์จริงอยู่ที่ frontend/public/docs/ (vite ก๊อปลง dist ตอน build)
+   ต้นฉบับอยู่ที่ docs/ ของ repo: แก้ที่นั่นแล้วคัดลอกทับที่ public/docs/ ด้วย
+   (build context ของ frontend มองไม่เห็น docs/ ที่ราก repo จึงอ้างข้ามไปไม่ได้) */
+const DOCS = [
+  {
+    file: "lineoa-webchat-integration-spec.md",
+    name: "สเปคเชื่อมต่อ LINE OA ↔ Web Chat",
+    desc: "สิ่งที่ขอจากทีม LINE OA: การส่งมอบตัวตนพนักงาน การเปิดหน้าแชท และการแจ้งเตือนกลับ",
+    status: "ร่าง v0.1",
+  },
+];
+
 export default function Workflow() {
   const [cfg, setCfg] = useState(null);
 
@@ -304,6 +316,26 @@ export default function Workflow() {
               จบด้วยการแจ้งคนที่รับผิดชอบเสมอ
             </p>
           </div>
+        </div>
+      </Section>
+
+      <Section title="เอกสารอ้างอิง" subtitle="ดาวน์โหลดไว้ส่งต่อให้ทีมที่เกี่ยวข้อง">
+        <div className="glass rounded-xl divide-y divide-white/10">
+          {DOCS.map((d) => (
+            <a
+              key={d.file}
+              href={`/docs/${d.file}`}
+              download
+              className="p-3 flex items-start gap-3 hover:bg-white/5 transition-colors"
+            >
+              <span className="text-lg leading-none mt-0.5">📄</span>
+              <div className="min-w-0 flex-1">
+                <p className="text-sm font-medium text-slate-100">{d.name}</p>
+                <p className="text-xs text-slate-400 mt-0.5">{d.desc}</p>
+              </div>
+              <Chip tone="sky">{d.status}</Chip>
+            </a>
+          ))}
         </div>
       </Section>
     </div>
