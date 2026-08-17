@@ -57,7 +57,7 @@ export default function TicketCard({ ticket }) {
         {ticket.title}
       </h3>
       <p className="text-sm text-slate-400 mt-1 truncate">
-        {ticket.line_user?.display_name || ticket.reporter_name || "ไม่ระบุผู้แจ้ง"} · {ticket.category || "ไม่ระบุหมวด"}
+        {ticket.line_user?.known_name || ticket.reporter_name || "ไม่ระบุผู้แจ้ง"} · {ticket.category || "ไม่ระบุหมวด"}
       </p>
       <div className="flex items-center gap-2 mt-3 flex-wrap">
         <StatusBadge status={ticket.status} />

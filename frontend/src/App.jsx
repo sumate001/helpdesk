@@ -6,6 +6,8 @@ import TicketList from "./pages/TicketList";
 import TicketDetail from "./pages/TicketDetail";
 import Reports from "./pages/Reports";
 import KnowledgeBase from "./pages/KnowledgeBase";
+import Approvals from "./pages/Approvals";
+import Workflow from "./pages/Workflow";
 import Settings from "./pages/Settings";
 import Users from "./pages/Users";
 import Profile from "./pages/Profile";
@@ -40,10 +42,12 @@ function Layout({ children }) {
           <NavLink to="/">ภาพรวม</NavLink>
           <NavLink to="/tickets">Tickets</NavLink>
           <NavLink to="/reports">รายงาน</NavLink>
+          <NavLink to="/approvals">การอนุมัติ</NavLink>
           {/* หน้าตั้งค่า/จัดการ เฉพาะ admin — staff ไม่ต้องเข้ามายุ่ง */}
           {isAdmin && <NavLink to="/kb">คลังความรู้</NavLink>}
           {isAdmin && <NavLink to="/users">เจ้าหน้าที่</NavLink>}
           {isAdmin && <NavLink to="/settings">ตั้งค่า</NavLink>}
+          <NavLink to="/workflow">การทำงานของระบบ</NavLink>
           <NavLink to="/profile">โปรไฟล์</NavLink>
           <button
             onClick={logout}
@@ -87,7 +91,9 @@ export default function App() {
       <Route path="/tickets" element={<Protected><TicketList /></Protected>} />
       <Route path="/tickets/:id" element={<Protected><TicketDetail /></Protected>} />
       <Route path="/reports" element={<Protected><Reports /></Protected>} />
+      <Route path="/approvals" element={<Protected><Approvals /></Protected>} />
       <Route path="/profile" element={<Protected><Profile /></Protected>} />
+      <Route path="/workflow" element={<Protected><Workflow /></Protected>} />
       <Route path="/kb" element={<AdminOnly><KnowledgeBase /></AdminOnly>} />
       <Route path="/users" element={<AdminOnly><Users /></AdminOnly>} />
       <Route path="/settings" element={<AdminOnly><Settings /></AdminOnly>} />

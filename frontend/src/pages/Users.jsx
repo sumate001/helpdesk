@@ -133,7 +133,8 @@ export default function Users() {
               value={form.role}
               onChange={(e) => setForm({ ...form, role: e.target.value })}
             >
-              <option value="staff">staff</option>
+              <option value="staff">staff (ช่างผู้ปฏิบัติ)</option>
+              <option value="supervisor">supervisor (หัวหน้างาน — มอบหมายงาน)</option>
               <option value="admin">admin</option>
             </select>
           </div>

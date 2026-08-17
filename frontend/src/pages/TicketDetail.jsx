@@ -188,12 +188,20 @@ export default function TicketDetail() {
           <div className="flex gap-2">
             <StatusBadge status={ticket.status} />
             <PriorityBadge priority={ticket.priority} />
+            {ticket.itamtv_level && (
+              <span
+                className="text-xs px-2 py-0.5 rounded-full ring-1 bg-amber-400/10 text-amber-300 ring-amber-400/30 self-center"
+                title="ระดับ SLA ที่ระบบประเมินจากอาการ"
+              >
+                {{"1":"L1 · 30 นาที","2":"L2 · 2 ชม.","3":"L3 · 1 วัน","4":"L4 · Open"}[ticket.itamtv_level]}
+              </span>
+            )}
           </div>
         </div>
         <h1 className="text-xl font-bold mt-2 text-glow">{ticket.title}</h1>
         <p className="text-slate-300 mt-2 whitespace-pre-wrap">{ticket.description}</p>
         <div className="text-sm text-slate-400 mt-4 grid grid-cols-2 gap-2">
-          <span>ผู้แจ้ง: {ticket.line_user?.display_name || ticket.reporter_name || "-"}</span>
+          <span>ผู้แจ้ง: {ticket.line_user?.known_name || ticket.reporter_name || "-"}</span>
           <span>แผนก: {ticket.line_user?.department || ticket.reporter_detail || "-"}</span>
           <span>หมวด: {ticket.category}</span>
           <span>ประเภท: {ticket.type}</span>
