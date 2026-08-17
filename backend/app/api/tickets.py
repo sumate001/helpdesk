@@ -56,6 +56,8 @@ def list_tickets(
             | (Ticket.title.ilike(like))
             | (Ticket.description.ilike(like))
             | (LineUser.display_name.ilike(like))
+            | (LineUser.self_name.ilike(like))
+            | (LineUser.emp_name.ilike(like))
             | (Ticket.reporter_name.ilike(like))
         )
     return query.order_by(Ticket.id.desc()).limit(500).all()
@@ -144,6 +146,8 @@ def update_ticket(
     if ticket.assigned_to and ticket.assigned_to != prev_assignee:
         from app.api.webhook import notify_staff_close
 
+        # ยังไม่เปิดเคสใน itamtv ตรงนี้ — การ "มอบหมาย" (หัวหน้างานสั่ง) ยังไม่ใช่การรับงาน
+        # เคสจะถูกส่งไป itamtv ตอนช่างเปลี่ยนสถานะเป็น in_progress ด้วย token ของตัวเอง
         asyncio.run(notify_staff_close(db, ticket))
     # สถานะเปลี่ยน → sync ไปอัปเดตเคสใน itamtv ให้ตรงกัน (best-effort)
     if ticket.status != prev_status:
@@ -151,13 +155,36 @@ def update_ticket(
     return ticket
 
 
+def _ensure_itamtv_case(db: Session, ticket: Ticket) -> None:
+    """เปิดเคสใน itamtv (ถ้ายังไม่เคยเปิด) ด้วย token ของช่างที่รับผิดชอบ — best-effort."""
+    if ticket.itamtv_job_no or not ticket.assigned_to:
+        return
+    staff = db.get(User, ticket.assigned_to)
+    try:
+        asyncio.run(itamtv_service.ensure_mirrored(db, ticket, staff))
+    except Exception as exc:  # noqa: BLE001
+        db.add(TicketComment(
+            ticket_id=ticket.id, is_internal=True,
+            content=f"⚠️ เปิดเคสใน itamtv ไม่สำเร็จ ({exc}) — รบกวนเปิดในระบบเองด้วยครับ",
+        ))
+        db.commit()
+
+
 def _sync_itamtv_status(db: Session, ticket: Ticket) -> None:
     """push สถานะ ticket ปัจจุบันไปเซ็ตในเคส itamtv โดยใช้ token ของช่างที่รับผิดชอบ."""
     target = itamtv_service.STATUS_TO_ITAMTV.get(ticket.status)
-    if not (target and ticket.itamtv_job_no and ticket.assigned_to):
+    if not (target and ticket.assigned_to):
+        return
+    _ensure_itamtv_case(db, ticket)  # ปิด/อัปเดตเคสที่ยังไม่เคยส่งไป itamtv
+    if not ticket.itamtv_job_no:
         return
     staff = db.get(User, ticket.assigned_to)
     if staff is None or not staff.itamtv_token:
+        db.add(TicketComment(
+            ticket_id=ticket.id, is_internal=True,
+            content="⚠️ sync สถานะไป itamtv ไม่ได้ — ช่างที่รับผิดชอบยังไม่ได้ผูก itamtv token",
+        ))
+        db.commit()
         return
     try:
         asyncio.run(itamtv_service.set_status(

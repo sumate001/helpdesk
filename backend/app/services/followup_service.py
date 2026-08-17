@@ -20,7 +20,7 @@ from app.models.ticket import Ticket
 from app.models.ticket_attachment import TicketAttachment
 from app.models.ticket_followup import TicketFollowup
 from app.models.user import User
-from app.services import itamtv_service, line_service, settings_service, ticket_service
+from app.services import line_service, settings_service, ticket_service
 
 logger = logging.getLogger(__name__)
 
@@ -225,6 +225,6 @@ def _process_escalations(db: Session) -> None:
             f"เห็นว่าเงียบไป ผมส่งเรื่องให้ทีม IT ตามต่อให้แล้วนะครับ จะได้ไม่ค้าง 🔧\nเลขที่เคส {ticket.ticket_no}"
         )
         asyncio.run(line_service.push(_push_target(conv), escalate_text))
-        asyncio.run(line_service.notify_group(ticket_service.group_notify_text(ticket)))
-        asyncio.run(itamtv_service.mirror_ticket(db, ticket, lu))
+        asyncio.run(line_service.notify_group(*ticket_service.group_notify(ticket)))
+        # ไม่ mirror ไป itamtv ตรงนี้ — รอช่างกดรับงานแล้วเปิดด้วย token ของช่างคนนั้น
         logger.info("escalated conversation %s → ticket %s", conv.id, ticket.ticket_no)

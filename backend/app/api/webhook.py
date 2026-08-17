@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
+from app.models.approval import ApprovalRequest, DepartmentApprover
 from app.models.conversation import Conversation
 from app.models.line_user import LineUser
 from app.models.ticket import Ticket
@@ -14,6 +15,7 @@ from app.models.ticket_comment import TicketComment
 from app.models.user import User
 from app.services import (
     ai_service,
+    approval_service,
     bot_message_service,
     conversation_service,
     followup_service,
@@ -21,6 +23,7 @@ from app.services import (
     line_service,
     rag_service,
     settings_service,
+    staff_agent,
     storage_service,
     ticket_service,
 )
@@ -45,6 +48,13 @@ REGISTER_PROMPT = (
     "ขอรหัสพนักงาน (หรืออีเมลบริษัท) หน่อยครับ\n"
     "จะได้รู้จักกันไว้ คราวหน้าแจ้งปัญหาจะได้ไม่ต้องถามข้อมูลซ้ำครับ 🙏"
 )
+# ถามก่อนเปิดเคสให้คนที่ยังไม่ได้ลงทะเบียน (ดู _identity_gate) — ถามครั้งเดียวต่อบทสนทนา
+IDENTITY_ASK = (
+    "ขอรหัสพนักงานหรืออีเมลบริษัทก่อนเปิดเคสหน่อยครับ 🙏\n"
+    "จะได้ระบุตัวผู้แจ้งให้ถูกคน (ชื่อใน LINE ส่วนใหญ่เป็นชื่อเล่น ใช้แทนไม่ได้ครับ)\n"
+    "ถ้าไม่สะดวก พิมพ์ชื่อ-นามสกุลจริงมาก็ได้ครับ"
+)
+_IDENTITY_ASK_MARK = "ขอรหัสพนักงานหรืออีเมลบริษัทก่อนเปิดเคส"  # marker ใน transcript
 
 
 @router.post("/line")
@@ -71,16 +81,24 @@ async def _reply(
     reply_token: str,
     text: str,
     with_quick_reply: bool = False,
-    quick_reply: str | None = None,
+    quick_reply: str | dict | None = None,
 ) -> None:
     """ตอบกลับ + จำ message id ที่ส่ง เพื่อรู้ทีหลังว่า user quote-reply ข้อความบอท."""
     ids = await line_service.reply(reply_token, text, with_quick_reply, quick_reply)
     bot_message_service.record(db, ids)
 
 
-async def _notify_group(db: Session, text: str) -> None:
-    ids = await line_service.notify_group(text)
+async def _notify_group(
+    db: Session, text: str, mentions: dict[str, str] | None = None
+) -> None:
+    ids = await line_service.notify_group(text, mentions)
     bot_message_service.record(db, ids)
+
+
+async def _notify_group_ticket(db: Session, ticket: Ticket) -> None:
+    """แจ้งเคสใหม่เข้ากลุ่ม IT พร้อม @mention ผู้รับมอบหมาย (ถ้ามีและผูก LINE ไว้)."""
+    text, mentions = ticket_service.group_notify(ticket)
+    await _notify_group(db, text, mentions)
 
 
 async def _maybe_offer_form(db: Session, reply_token: str, text: str) -> bool:
@@ -180,6 +198,12 @@ async def _handle_postback(db: Session, line_user_id: str, event: dict) -> None:
     data = _parse_postback((event.get("postback") or {}).get("data", ""))
     reply_token = event.get("replyToken")
     action = data.get("action")
+    if action in ("approve_req", "reject_req"):
+        await _handle_approval_postback(db, line_user_id, reply_token, action, data)
+        return
+    if action in ("accept_approver", "decline_approver"):
+        await _handle_approver_invite(db, line_user_id, reply_token, action, data)
+        return
     if action not in ("close_case", "accept_case"):
         return
 
@@ -198,33 +222,173 @@ async def _handle_postback(db: Session, line_user_id: str, event: dict) -> None:
         return
 
     if action == "accept_case":
-        note = await _apply_ticket_status(db, ticket, staff, "in_progress")
+        note = await staff_agent.apply_ticket_status(db, ticket, staff, "in_progress")
         await _reply(db, reply_token,
                      f"รับงานเคส {ticket.ticket_no} แล้วครับ 🙋 (กำลังดำเนินการ){note}")
         return
 
     # close_case → ปิดฝั่ง dashboard + itamtv ด้วยสิทธิ์ช่างคนที่กดปุ่ม
-    note = await _apply_ticket_status(db, ticket, staff, "resolved")
+    note = await staff_agent.apply_ticket_status(db, ticket, staff, "resolved")
     await _reply(db, reply_token, f"ปิดเคส {ticket.ticket_no} เรียบร้อยครับ ✅{note}")
 
 
-async def notify_staff_new_ticket(db: Session, ticket: Ticket) -> None:
+async def _handle_approval_postback(db: Session, line_user_id: str, reply_token: str,
+                                    action: str, data: dict) -> None:
+    """หัวหน้ากดปุ่มอนุมัติ/ไม่อนุมัติจากการ์ดใน LINE.
+
+    ตรวจสิทธิ์จาก userId ของคนกด (LINE เป็นคนบอก ปลอมไม่ได้) เทียบกับผู้อนุมัติที่ระบุไว้ —
+    ต่อให้การ์ดถูก forward ไปให้คนอื่น คนอื่นกดก็ไม่ผ่าน
+    """
+    req = db.get(ApprovalRequest, int(data.get("req_id", 0) or 0))
+    if req is None:
+        await _reply(db, reply_token, "ไม่พบคำขออนุมัตินี้ในระบบครับ")
+        return
+    if req.approver_line_user_id and req.approver_line_user_id != line_user_id:
+        logger.warning("approval %s pressed by wrong user %s", req.id, line_user_id)
+        await _reply(db, reply_token, "ปุ่มนี้ใช้ได้เฉพาะผู้อนุมัติที่ระบุไว้ครับ 🙏")
+        return
+    if req.status != "pending":
+        ticket = db.get(Ticket, req.ticket_id)
+        done = {"approved": "อนุมัติ", "rejected": "ไม่อนุมัติ"}.get(req.status, req.status)
+        await _reply(db, reply_token,
+                     f"คำขอนี้ถูก{done}ไปแล้วครับ ({ticket.ticket_no if ticket else '-'})")
+        return
+
+    approve = action == "approve_req"
+    ticket = await approval_service.decide(db, req, approve, by_line_user_id=line_user_id)
+    if approve:
+        await _reply(db, reply_token,
+                     f"อนุมัติเรียบร้อยครับ ✅\n{ticket.ticket_no} — {ticket.title}\n"
+                     f"ส่งต่อให้ทีม IT ดำเนินการแล้วครับ")
+        return
+    # ไม่อนุมัติ → เปิดช่องให้พิมพ์เหตุผลตามมาได้ 1 ข้อความ (ผู้ขอควรได้รู้ว่าทำไม)
+    req.awaiting_reason = True
+    db.commit()
+    await _reply(db, reply_token,
+                 f"บันทึกว่าไม่อนุมัติแล้วครับ ❌ ({ticket.ticket_no})\n"
+                 f"ถ้าจะระบุเหตุผลให้ผู้ขอทราบ พิมพ์มาได้เลยในข้อความถัดไปครับ")
+
+
+async def _handle_approver_invite(db: Session, line_user_id: str, reply_token: str,
+                                  action: str, data: dict) -> None:
+    """คนที่ถูกตั้งเป็นผู้อนุมัติกดยอมรับ/ปฏิเสธบทบาทจากการ์ดเชิญ."""
+    row = db.get(DepartmentApprover, int(data.get("appr_id", 0) or 0))
+    if row is None:
+        await _reply(db, reply_token, "ไม่พบข้อมูลผู้อนุมัตินี้ในระบบครับ")
+        return
+    # ตรวจว่าคนกดคือเจ้าตัวจริง (การ์ดถูก forward ไปให้คนอื่นกดไม่ได้)
+    if approval_service.line_id_of(db, row.approver_emp_code) != line_user_id:
+        await _reply(db, reply_token, "ปุ่มนี้ใช้ได้เฉพาะผู้ที่ถูกตั้งเป็นผู้อนุมัติครับ 🙏")
+        return
+
+    accept = action == "accept_approver"
+    await approval_service.accept_approver_role(db, row, accept)
+    if accept:
+        pending = approval_service.pending_for_approver(db, line_user_id)
+        tail = (f"\n\nตอนนี้มีคำขอรอคุณพิจารณาอยู่ {len(pending)} รายการครับ"
+                if pending else "")
+        await _reply(db, reply_token,
+                     f"รับทราบครับ 🙏 คุณเป็นผู้อนุมัติของฝ่าย “{row.department}” แล้ว\n"
+                     f"มีคำขอเมื่อไหร่ ผมจะส่งการ์ดมาให้กดที่นี่เลยครับ{tail}")
+    else:
+        await _reply(db, reply_token,
+                     "รับทราบครับ ผมแจ้งทีม IT ให้ตั้งผู้อนุมัติคนใหม่แล้วครับ 🙏")
+
+
+async def _handle_approver_pick(db: Session, line_user_id: str, reply_token: str,
+                                text: str) -> bool:
+    """ผู้ขอกำลังถูกถามว่าหัวหน้าคือใคร → ข้อความนี้คือชื่อหัวหน้า. คืน True ถ้าจัดการแล้ว."""
+    req = approval_service.awaiting_pick_for(db, line_user_id)
+    if req is None:
+        return False
+    query = text.strip()
+    if not query:
+        return False
+    try:
+        found = await itamtv_service.search_employees(query)
+    except Exception:  # noqa: BLE001
+        logger.exception("search supervisor failed")
+        await _reply(db, reply_token, "ตอนนี้ต่อกับระบบพนักงานไม่ติดครับ ลองพิมพ์ชื่ออีกครั้งนะครับ")
+        return True
+
+    if not found:
+        await _reply(db, reply_token,
+                     f"หาพนักงานชื่อ “{query}” ไม่เจอครับ ลองพิมพ์ชื่อจริง-นามสกุลดูได้ไหมครับ")
+        return True
+    if len(found) > 1:
+        names = [e.get("name", "") for e in found][:8]
+        listing = "\n".join(
+            f"{i}. {e.get('name')} — {e.get('department') or '-'}"
+            for i, e in enumerate(found[:8], 1)
+        )
+        await _reply(db, reply_token,
+                     f"เจอหลายคนครับ หัวหน้าของคุณคนไหนครับ?\n{listing}",
+                     quick_reply=line_service.choice_quick_reply(names))
+        return True
+
+    lu = db.query(LineUser).filter(LineUser.line_user_id == line_user_id).one_or_none()
+    ok = await approval_service.attach_picked_approver(
+        db, req, found[0], line_user_id,
+        lu.known_name if lu else None,
+    )
+    if not ok:
+        await _reply(db, reply_token, "เลือกตัวเองเป็นผู้อนุมัติไม่ได้ครับ 🙏 รบกวนระบุหัวหน้าอีกทีครับ")
+        return True
+    await _reply(db, reply_token,
+                 f"ขอบคุณครับ 🙏 ส่งคำขอไปให้ {found[0].get('name')} พิจารณาแล้ว\n"
+                 f"ได้ผลอย่างไรผมจะแจ้งกลับให้ทราบทันทีครับ")
+    return True
+
+
+async def _handle_approval_reason(db: Session, line_user_id: str, reply_token: str,
+                                  text: str) -> bool:
+    """ข้อความถัดจากการกด 'ไม่อนุมัติ' = เหตุผล → บันทึก + ส่งให้ผู้ขอ. คืน True ถ้าจัดการแล้ว."""
+    req = approval_service.awaiting_reason_for(db, line_user_id)
+    if req is None:
+        return False
+    req.awaiting_reason = False
+    req.comment = text.strip()[:1000]
+    db.commit()
+    ticket = db.get(Ticket, req.ticket_id)
+    if ticket is not None:
+        approval_service._log(db, ticket, f"เหตุผลที่ไม่อนุมัติ: {req.comment}")
+        await approval_service.notify_requester(
+            db, ticket, False, req.approver_name or "ผู้อนุมัติ", req.comment
+        )
+    await _reply(db, reply_token, "ส่งเหตุผลให้ผู้ขอแล้วครับ 🙏")
+    return True
+
+
+async def notify_staff_new_ticket(
+    db: Session, ticket: Ticket, only_staff: User | None = None
+) -> None:
     """มีเคสใหม่เข้ามา → ส่งการ์ดงาน (ปุ่มรับงาน/ปิดเคส) ไปหา staff ทุกคนที่ผูก LINE ไว้.
 
     ใครก็กด 'รับงาน' ได้ → กลายเป็นผู้รับผิดชอบ (assign) + in_progress. best-effort:
     ส่งไม่ได้ทีละคนก็ข้าม ไม่ให้กระทบการเปิดเคส.
+
+    only_staff = ส่งเฉพาะช่างคนนั้น (ใช้ตอนหัวหน้างานมอบหมายเคสให้คนใดคนหนึ่ง).
     """
-    staffs = (
-        db.query(User)
-        .filter(User.is_active.is_(True), User.line_user_id.isnot(None))
-        .all()
-    )
+    if only_staff is not None:
+        staffs = [only_staff] if only_staff.line_user_id else []
+    else:
+        # ไม่ส่งการ์ด "รับงาน" ให้หัวหน้างาน — เขาไม่ได้ลงมือเอง (เห็นเคสจากกลุ่ม IT/dashboard อยู่แล้ว)
+        staffs = (
+            db.query(User)
+            .filter(
+                User.is_active.is_(True),
+                User.line_user_id.isnot(None),
+                User.role != "supervisor",
+            )
+            .all()
+        )
     if not staffs:
         return
     flex = line_service.work_case_flex(
         ticket.ticket_no, ticket.id,
         ticket.title or ticket.description or "-",
         ticket_service.STATUS_LABELS_TH.get(ticket.status, ticket.status),
+        level=ticket.itamtv_level,
     )
     for staff in staffs:
         try:
@@ -350,13 +514,17 @@ def _update_user_info(db: Session, lu: LineUser, result: dict) -> None:
     """บันทึกชื่อ/อาคาร/ชั้น ที่เก็บได้ระหว่าง intake ลง line_users."""
     changed = False
     if result.get("full_name"):
-        lu.display_name = str(result["full_name"])[:100]
+        # ลง self_name ไม่ใช่ display_name — display_name โดน LINE profile เขียนทับ
+        # ทุกข้อความ (upsert_line_user) ชื่อที่อุตส่าห์ถามมาจึงหายทุกรอบ
+        lu.self_name = str(result["full_name"])[:100]
         changed = True
     if result.get("building"):
         lu.building = str(result["building"])[:100]
         changed = True
     if result.get("floor"):
         lu.floor = str(result["floor"])[:20]
+    if result.get("phone"):
+        lu.phone = str(result["phone"])[:30]
         changed = True
     if changed:
         db.commit()
@@ -367,15 +535,18 @@ def _known_info(
 ) -> dict:
     """ข้อมูลผู้ใช้ที่มีอยู่แล้ว → ส่งให้ AI ไม่ถามซ้ำ.
 
-    ชื่อเอาจาก Employee DB ก่อน (ผูกตอนลงทะเบียน) — display_name โดน LINE profile
-    เขียนทับได้ตลอด เชื่อไม่ได้ว่าเป็นชื่อจริง.
+    ชื่อเอาจาก Employee DB ก่อน (ผูกตอนลงทะเบียน) แล้วค่อยชื่อที่ผู้ใช้บอกบอทเอง —
+    ห้าม fallback ไป display_name เด็ดขาด: มันคือชื่อที่ตั้งเองใน LINE (ส่วนใหญ่เป็น
+    ชื่อเล่น) ถ้าส่งเข้าไปในบล็อก "ทราบแล้ว" บอทจะนึกว่ารู้ชื่อจริงแล้วเลยไม่ถาม
+    แล้วชื่อเล่นจะไหลไปถึง dropdown ผู้แจ้งของ itamtv จนเปิดเคสไม่ผ่าน.
 
     registered: บอก AI ว่าผู้ใช้ผูกกับฐานข้อมูลพนักงานแล้วหรือยัง — ส่งเฉพาะตอนเปิด
     ระบบทะเบียน (ปิดอยู่ = ไม่มี flow ลงทะเบียน จะพูดถึงก็สับสนเปล่าๆ)."""
     info = {
-        "full_name": lu.emp_name or lu.display_name,
+        "full_name": lu.emp_name or lu.self_name,
         "building": lu.building,
         "floor": lu.floor,
+        "phone": lu.phone,
     }
     if settings_service.get("EMPLOYEE_LOOKUP_ENABLED"):
         info["registered"] = lu.employee_id is not None
@@ -389,33 +560,34 @@ def _known_info(
     return info
 
 
-async def _try_register(db: Session, lu: LineUser, text: str, reply_token: str) -> bool:
-    """ข้อความหน้าตาเป็นรหัสพนักงาน/อีเมล → ผูกกับ Employee DB ผ่าน /lookup (ยิงสด ไม่ cache).
-
-    คืน True = จัดการข้อความนี้จบแล้ว (ไม่ต้องเข้า intake), False = ไม่ใช่การลงทะเบียน.
-    """
-    if not settings_service.get("EMPLOYEE_LOOKUP_ENABLED"):
-        return False
+def _lookup_key(text: str) -> dict | None:
+    """ข้อความนี้หน้าตาเป็นรหัสพนักงาน/อีเมลไหม → kwargs สำหรับ lookup_employee_exact."""
     key = text.strip()
     if EMAIL_RE.match(key):
-        kwargs = {"email": key}
-    elif EMP_CODE_RE.match(key):
-        kwargs = {"emp_code": key}
-    else:
-        return False
+        return {"email": key}
+    if EMP_CODE_RE.match(key):
+        return {"emp_code": key}
+    return None
 
+
+async def _bind_employee(db: Session, lu: LineUser, key: str) -> tuple[bool, str]:
+    """ผูก LINE user เข้ากับ Employee DB ด้วยรหัสพนักงาน/อีเมล (ยิง /lookup สด ไม่ cache).
+
+    คืน (สำเร็จไหม, ข้อความบอกผลไว้ตอบผู้ใช้) — ผู้เรียกเลือกเองว่าจะตอบหรือกลืน.
+    """
+    kwargs = _lookup_key(key)
+    if kwargs is None:
+        return False, ""
     try:
         emp = await itamtv_service.lookup_employee_exact(**kwargs)
     except Exception:  # noqa: BLE001
         logger.exception("employee exact lookup failed for %s", key)
-        await _reply(db, reply_token,
-                     "ตอนนี้ต่อกับระบบทะเบียนพนักงานไม่ติดครับ รบกวนลองใหม่อีกทีนะครับ 🙏")
-        return True
+        return False, "ตอนนี้ต่อกับระบบทะเบียนพนักงานไม่ติดครับ รบกวนลองใหม่อีกทีนะครับ 🙏"
     if emp is None:
-        await _reply(db, reply_token,
-                     f"หา \"{key}\" ในทะเบียนพนักงานไม่เจอครับ\n"
-                     "ลองเช็กรหัสอีกทีนะครับ หรือจะพิมพ์อีเมลบริษัทมาแทนก็ได้ครับ")
-        return True
+        return False, (
+            f"หา \"{key.strip()}\" ในทะเบียนพนักงานไม่เจอครับ\n"
+            "ลองเช็กรหัสอีกทีนะครับ หรือจะพิมพ์อีเมลบริษัทมาแทนก็ได้ครับ"
+        )
 
     lu.employee_id = emp["id"]
     lu.emp_code = emp.get("emp_code") or lu.emp_code
@@ -431,10 +603,52 @@ async def _try_register(db: Session, lu: LineUser, text: str, reply_token: str) 
     db.commit()
     _maybe_link_staff(db, lu)
     dept = f" ({emp['department']})" if emp.get("department") else ""
-    await _reply(db, reply_token,
-                 f"เรียบร้อยครับ ✅ สวัสดีคุณ{emp['name']}{dept}\n"
-                 "ต่อไปมีปัญหา IT ทักมาได้เลย ไม่ต้องแนะนำตัวใหม่แล้วครับ 🙌\n"
-                 "(ถ้าข้อมูลไม่ตรง พิมพ์รหัสพนักงานหรืออีเมลใหม่มาได้เลยครับ)")
+    return True, (
+        f"เรียบร้อยครับ ✅ สวัสดีคุณ{emp['name']}{dept}\n"
+        "ต่อไปมีปัญหา IT ทักมาได้เลย ไม่ต้องแนะนำตัวใหม่แล้วครับ 🙌\n"
+        "(ถ้าข้อมูลไม่ตรง พิมพ์รหัสพนักงานหรืออีเมลใหม่มาได้เลยครับ)"
+    )
+
+
+def _identity_asked(conv: Conversation) -> bool:
+    """เคยขอรหัสพนักงานก่อนเปิดเคสไปแล้วในบทสนทนานี้ไหม."""
+    return any(
+        m["role"] == "assistant" and _IDENTITY_ASK_MARK in m.get("content", "")
+        for m in conversation_service.get_transcript(conv)
+    )
+
+
+async def _identity_gate(
+    db: Session, conv: Conversation, lu: LineUser, result: dict, user_text: str
+) -> str | None:
+    """ก่อนเปิดเคสจริง ผู้แจ้งต้องระบุตัวได้ — คืนข้อความที่ต้องถามกลับ (None = ผ่าน).
+
+    ชื่อใน LINE เป็นชื่อเล่นที่ตั้งเองได้ ระบุตัวคนไม่ได้ → itamtv รับไม่ได้ (dropdown
+    ผู้แจ้งแมตช์ชื่อจริงเท่านั้น) และช่างก็ตามตัวไม่ถูก. ยังไม่ลงทะเบียน = ขอรหัส/อีเมล
+    "ครั้งเดียว" ก่อนเปิด — ให้มาก็ผูกให้ทันที, ไม่ให้ก็ยอมเปิดเคสต่อ (ห้ามบล็อกเคสด่วน
+    ไว้เพราะข้อมูลทะเบียน) แต่รอบนั้นบอทได้ขอชื่อ-นามสกุลจริงไปแล้วอย่างน้อยหนึ่งครั้ง.
+    """
+    if not settings_service.get("EMPLOYEE_LOOKUP_ENABLED") or lu.employee_id is not None:
+        return None
+    # ผู้ใช้เพิ่งพิมพ์รหัส/อีเมลมาเทิร์นนี้ (หรือ AI สกัดมาให้) → ผูกเลย แล้วเปิดเคสต่อได้
+    # (ในกลุ่ม _try_register ไม่ทำงาน ทางนี้จึงเป็นทางเดียวที่ผูกให้ได้)
+    for key in (user_text, str(result.get("emp_code") or "")):
+        if key and _lookup_key(key) and (await _bind_employee(db, lu, key))[0]:
+            return None
+    return None if _identity_asked(conv) else IDENTITY_ASK
+
+
+async def _try_register(db: Session, lu: LineUser, text: str, reply_token: str) -> bool:
+    """ข้อความหน้าตาเป็นรหัสพนักงาน/อีเมล → ผูกกับ Employee DB แล้วตอบผลให้ผู้ใช้.
+
+    คืน True = จัดการข้อความนี้จบแล้ว (ไม่ต้องเข้า intake), False = ไม่ใช่การลงทะเบียน.
+    """
+    if not settings_service.get("EMPLOYEE_LOOKUP_ENABLED"):
+        return False
+    if _lookup_key(text) is None:
+        return False
+    _ok, msg = await _bind_employee(db, lu, text)
+    await _reply(db, reply_token, msg)
     return True
 
 
@@ -445,6 +659,23 @@ def _resolve_staff(db: Session, line_user_id: str) -> User | None:
         .filter(User.line_user_id == line_user_id, User.is_active.is_(True))
         .one_or_none()
     )
+
+
+def _find_staff_by_name(db: Session, name: str) -> User | None:
+    """หา staff จากชื่อที่หัวหน้างานพูดถึง (display_name/username) — คืน None ถ้าไม่ชัด."""
+    name = name.strip()
+    if not name:
+        return None
+    rows = (
+        db.query(User)
+        .filter(
+            User.is_active.is_(True),
+            User.role != "supervisor",  # หัวหน้างานไม่ใช่ผู้ปฏิบัติ
+            (User.display_name.ilike(f"%{name}%")) | (User.username.ilike(f"%{name}%")),
+        )
+        .all()
+    )
+    return rows[0] if len(rows) == 1 else None
 
 
 def _maybe_link_staff(db: Session, lu: LineUser) -> None:
@@ -481,239 +712,13 @@ def _maybe_link_staff(db: Session, lu: LineUser) -> None:
     logger.info("auto-link staff %s ↔ LINE %s", staff.username, lu.line_user_id)
 
 
-async def _apply_ticket_status(
-    db: Session, ticket: Ticket, staff: User, target: str
-) -> str:
-    """เปลี่ยนสถานะ ticket ฝั่ง dashboard + sync itamtv ด้วยสิทธิ์ช่างคนที่สั่ง.
-
-    target ∈ {in_progress, resolved}. คืนข้อความหมายเหตุผล itamtv (อาจว่าง).
-    ใช้ร่วมกันทั้งปุ่ม postback และเครื่องมือ set_status ของผู้ช่วย staff.
-    """
-    ticket.status = target
-    if ticket.assigned_to is None:
-        ticket.assigned_to = staff.id
-    if target == "resolved":
-        ticket.resolved_at = datetime.now(timezone.utc)
-    db.add(TicketComment(
-        ticket_id=ticket.id, user_id=staff.id, is_internal=True,
-        content=f"เปลี่ยนสถานะเป็น {ticket.status} ผ่าน LINE โดย {staff.display_name or staff.username}",
-    ))
-    db.commit()
-
-    if not ticket.itamtv_job_no:
-        return ""
-    itamtv_target = itamtv_service.STATUS_TO_ITAMTV.get(target)
-    if itamtv_target is None:
-        return ""
-    try:
-        if not staff.itamtv_token:
-            raise RuntimeError("บัญชีช่างยังไม่ได้ผูก itamtv token (ตั้งในหน้า Users)")
-        msg = await itamtv_service.set_status(
-            ticket.itamtv_job_no, token=staff.itamtv_token, target=itamtv_target,
-            people_code=staff.itamtv_emp_code,
-            note=f"อัปเดตโดย {staff.display_name or staff.username} ผ่าน LINE",
-        )
-        return f"\nitamtv: {msg}"
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("itamtv set_status failed for %s: %s", ticket.ticket_no, exc)
-        db.add(TicketComment(
-            ticket_id=ticket.id, user_id=staff.id, is_internal=True,
-            content=f"⚠️ อัปเดตสถานะใน itamtv อัตโนมัติไม่ได้ ({exc}) — รบกวนทำในระบบเองด้วยครับ",
-        ))
-        db.commit()
-        return "\n(⚠️ อัปเดตใน itamtv อัตโนมัติไม่ได้ รบกวนทำในระบบเองด้วยครับ)"
-
-
-async def _staff_run_tool(db: Session, staff: User, tool: str, args: dict) -> str:
-    """รันเครื่องมือที่ผู้ช่วย staff เรียก → คืนผลลัพธ์เป็นข้อความ (ป้อนกลับให้ AI สรุป)."""
-    import json as _json
-
-    logger.info("staff tool run: %s(%s) by %s", tool, args, staff.username)
-
-    if tool == "search_tickets":
-        assignee_id = staff.id if str(args.get("assignee", "")).lower() == "me" else None
-        rows = ticket_service.search_tickets(
-            db, status=args.get("status") or None,
-            assignee_id=assignee_id, query=args.get("query") or None,
-        )
-        return _json.dumps({"tickets": rows}, ensure_ascii=False)
-
-    if tool == "get_ticket":
-        t = ticket_service.get_by_no(db, str(args.get("ticket_no", "")))
-        if t is None:
-            return _json.dumps({"error": "ไม่พบเคสนี้"}, ensure_ascii=False)
-        return _json.dumps(ticket_service._ticket_dict(t), ensure_ascii=False)
-
-    if tool == "search_employees":
-        try:
-            emps = await itamtv_service.search_employees(str(args.get("query", "")))
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("search_employees failed: %s", exc)
-            return _json.dumps({"error": "ต่อกับระบบพนักงานไม่ติด"}, ensure_ascii=False)
-        people = [
-            {"id": e.get("id"), "name": e.get("name"), "nickname": e.get("nickname"),
-             "emp_code": e.get("emp_code"), "department": e.get("department"),
-             "position": e.get("position"), "bu": e.get("bu")}
-            for e in emps
-        ]
-        return _json.dumps({"count": len(people), "employees": people}, ensure_ascii=False)
-
-    if tool == "list_assets":
-        emp = None
-        try:
-            if args.get("emp_code"):
-                emp = await itamtv_service.lookup_employee_exact(emp_code=str(args["emp_code"]))
-            elif args.get("name"):
-                emp = await itamtv_service.lookup_employee(str(args["name"]))
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("list_assets lookup failed: %s", exc)
-            return _json.dumps({"error": "ต่อกับระบบพนักงานไม่ติด"}, ensure_ascii=False)
-        if not emp:
-            return _json.dumps({"error": "หาพนักงานคนนี้ไม่เจอ"}, ensure_ascii=False)
-        try:
-            assets = await itamtv_service.fetch_assets(emp["id"])
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("fetch_assets failed: %s", exc)
-            return _json.dumps({"error": "ดึงข้อมูลอุปกรณ์ไม่สำเร็จ"}, ensure_ascii=False)
-        return _json.dumps({
-            "employee": emp.get("name"),
-            "assets": itamtv_service.asset_summary(assets) or "ไม่มีอุปกรณ์ในระบบ",
-        }, ensure_ascii=False)
-
-    if tool == "set_status":
-        target = str(args.get("status", "")).strip()
-        if target not in ("in_progress", "resolved"):
-            return _json.dumps({"error": "status ต้องเป็น in_progress หรือ resolved"},
-                               ensure_ascii=False)
-        t = ticket_service.get_by_no(db, str(args.get("ticket_no", "")))
-        if t is None:
-            return _json.dumps({"error": "ไม่พบเคสนี้"}, ensure_ascii=False)
-        note = await _apply_ticket_status(db, t, staff, target)
-        return _json.dumps({
-            "ok": True, "ticket_no": t.ticket_no, "status": t.status, "itamtv": note.strip(),
-        }, ensure_ascii=False)
-
-    if tool == "create_ticket":
-        return await _staff_create_ticket(db, staff, args)
-
-    return _json.dumps({"error": "ไม่รู้จักเครื่องมือนี้"}, ensure_ascii=False)
-
-
-_VALID_TICKET_CATEGORIES = (
-    "hardware", "software", "network", "account",
-    "service_request", "equipment_request", "other",
-)
-_VALID_TICKET_PRIORITIES = ("low", "medium", "high", "critical")
-
-
-async def _staff_create_ticket(db: Session, staff: User, args: dict) -> str:
-    """เปิด ticket แทนผู้แจ้งทางโทรศัพท์ตามที่ staff สั่ง → assign ให้ staff + in_progress.
-
-    ผู้แจ้งหาไม่เจอ/เจอหลายคน → คืน error ให้ AI ถามกลับ (ไม่เดา). best-effort mirror itamtv.
-    """
-    import json as _json
-
-    emp = None
-    try:
-        if args.get("reporter_emp_code"):
-            emp = await itamtv_service.lookup_employee_exact(
-                emp_code=str(args["reporter_emp_code"])
-            )
-            if emp is None:
-                return _json.dumps(
-                    {"error": f"หารหัสพนักงาน {args['reporter_emp_code']} ไม่เจอ ให้ถาม staff ยืนยัน"},
-                    ensure_ascii=False,
-                )
-        elif args.get("reporter_name"):
-            found = await itamtv_service.search_employees(str(args["reporter_name"]))
-            if len(found) == 1:
-                emp = found[0]
-            elif len(found) == 0:
-                return _json.dumps(
-                    {"error": f"หาพนักงานชื่อ '{args['reporter_name']}' ไม่เจอ ให้ถาม staff ระบุใหม่"},
-                    ensure_ascii=False,
-                )
-            else:
-                return _json.dumps({
-                    "error": "เจอพนักงานหลายคน ให้ถาม staff ว่าคนไหน",
-                    "candidates": [
-                        {"name": e.get("name"), "emp_code": e.get("emp_code"),
-                         "department": e.get("department")} for e in found
-                    ],
-                }, ensure_ascii=False)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("create_ticket reporter lookup failed: %s", exc)
-        return _json.dumps({"error": "ต่อกับระบบพนักงานไม่ติด ลองใหม่อีกที"}, ensure_ascii=False)
-
-    reporter_name = (emp or {}).get("name") or str(args.get("reporter_name") or "").strip()
-    if not reporter_name:
-        return _json.dumps({"error": "ยังไม่รู้ว่าใครเป็นผู้แจ้ง ให้ถาม staff ก่อน"},
-                           ensure_ascii=False)
-
-    category = args.get("category")
-    if category not in _VALID_TICKET_CATEGORIES:
-        category = "other"
-    priority = args.get("priority")
-    if priority not in _VALID_TICKET_PRIORITIES:
-        priority = "medium"
-    title = (str(args.get("title") or "").strip() or f"{reporter_name} แจ้งปัญหา")[:255]
-
-    dept = (emp or {}).get("department") or "-"
-    code = (emp or {}).get("emp_code") or "-"
-    header = f"[เปิดโดยเจ้าหน้าที่ทางโทรศัพท์] ผู้แจ้ง: {reporter_name} ({dept}) รหัส {code}"
-    description = header + "\n\n" + str(args.get("description") or "").strip()
-
-    ticket = ticket_service.create_ticket(
-        db, title=title, description=description, category=category,
-        ticket_type="L2", priority=priority, status="in_progress",
-    )
-    ticket.assigned_to = staff.id
-    ticket.reporter_name = reporter_name[:100]
-    building = str(args.get("building") or "").strip()
-    floor = str(args.get("floor") or "").strip()
-    loc = "-".join(p for p in (building, f"ชั้น {floor}" if floor else "") if p)
-    detail_parts = [p for p in (
-        (emp or {}).get("department"), loc or None, (emp or {}).get("phone")
-    ) if p]
-    ticket.reporter_detail = (" · ".join(detail_parts) or None)
-    if ticket.reporter_detail:
-        ticket.reporter_detail = ticket.reporter_detail[:255]
-    db.add(TicketComment(
-        ticket_id=ticket.id, user_id=staff.id, is_internal=True,
-        content=f"เปิดเคสแทนผู้แจ้งทางโทรศัพท์ โดย {staff.display_name or staff.username}",
-    ))
-    db.commit()
-    db.refresh(ticket)
-
-    # mirror itamtv ด้วยข้อมูลผู้แจ้ง (สร้าง LineUser ชั่วคราว ไม่ผูก DB — mirror อ่าน attr อย่างเดียว)
-    lu = LineUser(
-        line_user_id=f"phone-in:{ticket.ticket_no}",
-        emp_name=reporter_name, emp_code=(emp or {}).get("emp_code"),
-        emp_email=(emp or {}).get("email"), department=(emp or {}).get("department"),
-        building=str(args.get("building") or "").strip() or None,
-        floor=str(args.get("floor") or "").strip() or None,
-    )
-    try:
-        await itamtv_service.mirror_ticket(db, ticket, lu)
-    except Exception:  # noqa: BLE001
-        logger.exception("mirror phone-in ticket %s failed", ticket.ticket_no)
-    try:
-        await _notify_group(db, ticket_service.group_notify_text(ticket))
-    except Exception:  # noqa: BLE001
-        logger.exception("group notify phone-in ticket %s failed", ticket.ticket_no)
-
-    return _json.dumps({
-        "ok": True, "ticket_no": ticket.ticket_no, "reporter": reporter_name,
-        "status": "in_progress", "assigned_to": staff.display_name or staff.username,
-    }, ensure_ascii=False)
-
-
 async def _run_staff_assistant(
     db: Session, staff: User, reply_token: str, text: str
 ) -> None:
     """โหมดผู้ช่วยสำหรับ IT staff — คุยได้ไม่จำกัด + เรียกเครื่องมือดูข้อมูล/สั่งการเคส.
 
-    วนเรียก ai_service.staff_turn: ถ้า action=tool → รันเครื่องมือ เติมผลลัพธ์เข้า history
+    วนเรียก ai_service.staff_turn (native tool-calling): ถ้า action=tools → รันทุกเครื่องมือ
+    ที่โมเดลขอมาในเทิร์นนั้น (ขอได้หลายตัว) เติมผลลัพธ์เข้า history
     แล้วเรียกซ้ำ (จำกัดรอบกัน loop) จนกว่าจะได้ action=answer → ตอบ staff.
 
     เก็บ transcript ใน conversations (channel="staff") เพื่อจำบริบทข้ามข้อความ — รวมผล
@@ -729,29 +734,41 @@ async def _run_staff_assistant(
 
     # จำกัดความยาว history ที่ป้อนโมเดล — กันของมั่ว/บริบทเก่าสะสมจนหลอนรอบถัดๆ
     # (ผล tool ของเทิร์นปัจจุบันอยู่ท้าย transcript จึงไม่โดนตัด)
+    ctx = staff_agent.Ctx(db=db, staff=staff)
+    performed: set[str] = set()  # เครื่องมือที่ลงมือทำจริงไปแล้วในเทิร์นนี้
     history = conversation_service.get_transcript(conv)[-_STAFF_HISTORY_LIMIT:]
     for _ in range(5):
-        result = await ai_service.staff_turn(history)
+        result = await ai_service.staff_turn(history, role=staff.role)
         if result["action"] == "answer":
-            conversation_service.append_message(db, conv, "assistant", result["reply"])
-            await _reply(db, reply_token, result["reply"])
+            reply = (staff_agent.guard_unbacked_claim(result["reply"], performed)
+                     or staff_agent.guard_fake_ticket_no(result["reply"], history))
+            conversation_service.append_message(db, conv, "assistant", reply)
+            await _reply(db, reply_token, reply)
             return
-        # action == "tool" → บันทึกคำสั่ง + ผลลัพธ์ลง transcript ให้จำข้ามข้อความได้
-        call = json.dumps(
-            {"action": "tool", "tool": result["tool"], "args": result["args"]},
-            ensure_ascii=False,
-        )
-        conversation_service.append_message(db, conv, "assistant", call)
-        tool_out = await _staff_run_tool(db, staff, result["tool"], result["args"])
-        conversation_service.append_message(db, conv, "tool", tool_out)
+        # action == "tools" → โมเดลขอเรียกเครื่องมือ (ได้หลายตัวในเทิร์นเดียว)
+        # บันทึกคำสั่ง + ผลลัพธ์ลง transcript ให้จำข้ามข้อความได้
+        blocks: list[str] = []
+        quick: dict | None = None
+        for c in result["calls"]:
+            call = json.dumps({"tool": c["tool"], "args": c["args"]}, ensure_ascii=False)
+            conversation_service.append_message(db, conv, "assistant", call)
+            tool_data = await staff_agent.run(ctx, c["tool"], c["args"])
+            if tool_data.get("ok"):
+                performed.add(c["tool"])
+            conversation_service.append_message(
+                db, conv, "tool", json.dumps(tool_data, ensure_ascii=False))
 
-        # กันมั่วขั้นสรุป: โมเดลเชื่อไม่ได้เวลาต้องอ่านผล tool มาเรียบเรียง (เคยได้ 5 คน
-        # แต่ตอบ "ไม่พบ"). สำหรับ tool ที่ "แสดงข้อมูล/ยืนยันผล" ให้ "โค้ด" จัดรูปคำตอบเอง
-        # จากผลจริง แล้วตอบ staff เลย — โมเดลมีหน้าที่แค่เลือก tool+args เท่านั้น
-        rendered = _render_staff_tool(result["tool"], json.loads(tool_out), result["args"])
-        if rendered is not None:
-            conversation_service.append_message(db, conv, "assistant", rendered)
-            await _reply(db, reply_token, rendered)
+            # กันมั่วขั้นสรุป: โมเดลเชื่อไม่ได้เวลาต้องอ่านผล tool มาเรียบเรียง (เคยได้ 5 คน
+            # แต่ตอบ "ไม่พบ"). สำหรับ tool ที่ "แสดงข้อมูล/ยืนยันผล" ให้ "โค้ด" จัดรูปคำตอบเอง
+            # จากผลจริง แล้วตอบ staff เลย — โมเดลมีหน้าที่แค่เลือก tool+args เท่านั้น
+            rendered = staff_agent.render(c["tool"], tool_data, c["args"])
+            if rendered is not None:
+                blocks.append(rendered)
+                quick = staff_agent.choices(c["tool"], tool_data) or quick
+        if blocks:
+            out = "\n\n".join(blocks)
+            conversation_service.append_message(db, conv, "assistant", out)
+            await _reply(db, reply_token, out, quick_reply=quick)
             return
         # tool ที่ยัง error/ต้องให้โมเดลถามต่อ (เช่น create_ticket เจอผู้แจ้งหลายคน) → วนต่อ
         history = conversation_service.get_transcript(conv)[-_STAFF_HISTORY_LIMIT:]
@@ -760,66 +777,11 @@ async def _run_staff_assistant(
                  "ขอโทษครับ ผมประมวลผลคำขอนี้ไม่จบ ลองถามใหม่แบบเจาะจงขึ้นได้ไหมครับ 🙏")
 
 
-def _render_staff_tool(tool: str, data: dict, args: dict) -> str | None:
-    """จัดรูปผล tool เป็นข้อความให้ staff แบบ deterministic (ไม่ผ่านโมเดล) — กันมั่ว 100%.
-
-    คืน None = ปล่อยให้โมเดลจัดการต่อ (เช่น create_ticket ที่ยัง error ต้องถามผู้แจ้งใหม่).
-    """
-    if tool == "search_employees":
-        emps = data.get("employees", [])
-        q = args.get("query", "")
-        if not emps:
-            return f"ค้นหา '{q}' ไม่พบพนักงานในระบบครับ ลองใช้ชื่อจริง/ชื่อเล่นอื่นดูได้ครับ"
-        lines = [f"เจอพนักงานที่ตรงกับ '{q}' {len(emps)} คนครับ:"]
-        for i, e in enumerate(emps, 1):
-            nick = f" ({e['nickname']})" if e.get("nickname") else ""
-            dept = e.get("department") or "-"
-            ref = e.get("emp_code") or (f"id {e['id']}" if e.get("id") else "-")
-            lines.append(f"{i}. {e.get('name')}{nick} — {dept} · {ref}")
-        return "\n".join(lines)
-
-    if tool == "list_assets":
-        if data.get("error"):
-            return f"{data['error']}ครับ"
-        return f"อุปกรณ์ที่ {data.get('employee')} ถือครอง:\n{data.get('assets')}"
-
-    if tool == "search_tickets":
-        tickets = data.get("tickets", [])
-        if not tickets:
-            return "ไม่พบเคสที่ตรงกับที่ค้นครับ"
-        lines = ["เคสที่เจอครับ:"]
-        for t in tickets:
-            lines.append(
-                f"- {t.get('ticket_no')} [{t.get('status_th')}] {t.get('title')}"
-                f" — ผู้แจ้ง {t.get('reporter') or '-'}"
-                + (f" · ดูแลโดย {t['assignee']}" if t.get("assignee") else "")
-            )
-        return "\n".join(lines)
-
-    if tool == "get_ticket":
-        if data.get("error"):
-            return f"{data['error']}ครับ"
-        return (
-            f"{data.get('ticket_no')} [{data.get('status_th')}]\n"
-            f"หัวข้อ: {data.get('title')}\n"
-            f"ผู้แจ้ง: {data.get('reporter') or '-'} ({data.get('department') or '-'})\n"
-            f"ผู้ดูแล: {data.get('assignee') or '-'} · ความเร่งด่วน {data.get('priority')}\n"
-            f"{data.get('description') or ''}"
-        )
-
-    if tool == "set_status" and data.get("ok"):
-        th = ticket_service.STATUS_LABELS_TH.get(data.get("status"), data.get("status"))
-        return f"อัปเดตเคส {data.get('ticket_no')} เป็น “{th}” แล้วครับ ✅{data.get('itamtv') or ''}"
-
-    if tool == "create_ticket" and data.get("ok"):
-        return (
-            f"เปิดเคส {data.get('ticket_no')} ให้แล้วครับ ✅\n"
-            f"ผู้แจ้ง: {data.get('reporter')} · assign ให้ {data.get('assigned_to')}"
-            f" · สถานะกำลังดำเนินการ 🔧"
-        )
-
-    # create_ticket/set_status ที่ error → None ให้โมเดลถามต่อ/แจ้ง staff เอง
-    return None
+async def _conversation_had_issue(db: Session, conv: Conversation) -> bool:
+    """บทสนทนานี้เคยมีปัญหา IT จริงไหม — ใช้กันเคสผีตอน action=resolved."""
+    return await ai_service.conversation_had_issue(
+        conversation_service.get_transcript(conv)
+    )
 
 
 def _create_ticket_from_intake(
@@ -895,12 +857,23 @@ async def _run_intake(
         return
 
     conversation_service.append_message(db, conv, "user", msg)
+    action = result["action"]
+
+    # จะเปิดเคสแล้วแต่ยังไม่รู้ว่าผู้แจ้งเป็นใคร → ขอรหัสพนักงานก่อน (ครั้งเดียว)
+    if action == "open":
+        ask = await _identity_gate(db, conv, lu, result, msg)
+        if ask:
+            _update_user_info(db, lu, result)  # ข้อมูลที่เก็บได้เทิร์นนี้อย่าให้หล่นหาย
+            # needs_confirm=True: ผู้ใช้ยืนยันเปิดเคสมาแล้ว เก็บสถานะนั้นไว้ให้เทิร์นหน้า
+            # เปิดต่อได้เลยหลังได้รหัส ไม่ต้องให้ยืนยันซ้ำ
+            conversation_service.append_message(db, conv, "assistant", ask, needs_confirm=True)
+            await _reply(db, reply_token, ask)
+            return
+
     conversation_service.append_message(
         db, conv, "assistant", result["reply"],
         needs_confirm=result["action"] == "ask" and bool(result.get("needs_confirm")),
     )
-
-    action = result["action"]
 
     if action == "ask":
         qr = "confirm" if result.get("needs_confirm") else None
@@ -909,10 +882,16 @@ async def _run_intake(
 
     if action == "resolved":
         # แก้ได้จากคำแนะนำ → เก็บเป็น ticket สถานะ ai_answered ไว้ทำสถิติ ไม่แจ้ง IT
-        ticket = _create_ticket_from_intake(db, lu, result, "ai_answered", "L1")
-        _attach_pending_images(db, conv, ticket)
-        _update_user_info(db, lu, result)
-        conversation_service.close(db, conv, ticket.id)
+        # แต่เฉพาะเมื่อบทสนทนานี้ "เคยมีปัญหา IT จริง" — กันเคสผีจากการกด "แก้ได้แล้ว"
+        # ในบทสนทนาที่ไม่เคยมีปัญหา (เช่น ทักทาย/ขอให้ตามคน แล้ว followup เด้งถาม)
+        if _conversation_had_issue(db, conv):
+            ticket = _create_ticket_from_intake(db, lu, result, "ai_answered", "L1")
+            _attach_pending_images(db, conv, ticket)
+            _update_user_info(db, lu, result)
+            conversation_service.close(db, conv, ticket.id)
+        else:
+            logger.info("resolved แต่ไม่เคยมีปัญหาจริงในบทสนทนา — ไม่เปิดเคสสถิติ")
+            conversation_service.close(db, conv, None)
         await _reply(db, reply_token, result["reply"])
         return
 
@@ -925,11 +904,19 @@ async def _run_intake(
     _update_user_info(db, lu, result)
     conversation_service.close(db, conv, ticket.id)
 
+    # ประเมิน Level SLA ตั้งแต่เปิด (การ์ดช่าง/dashboard จะได้แสดงทันที ไม่ต้องรอตอน mirror)
+    level = await ai_service.estimate_level(
+        ticket.title, ticket.description or "", ticket.priority
+    )
+    if level:
+        ticket.itamtv_level = level
+        db.commit()
+
     db.refresh(ticket)
-    await _notify_group(db, ticket_service.group_notify_text(ticket))
+    await _notify_group_ticket(db, ticket)
     if not is_approval:
-        # เคสซ่อม/แก้ไข → เปิดคู่ขนานใน itamtv + แนบข้อมูลเครื่องผู้แจ้ง (best-effort)
-        await itamtv_service.mirror_ticket(db, ticket, lu)
+        # เคสจากผู้ใช้: เก็บไว้ในระบบเราก่อน — ไป itamtv ตอนช่างกดรับงาน (ensure_mirrored)
+        # เพื่อให้เคสขึ้นชื่อช่างคนที่รับจริง ไม่ใช่ token กลาง
         # แจ้ง staff ที่ผูก LINE ให้รู้ว่ามีงานเข้า + กดรับงาน/ปิดเคสได้จาก LINE
         await notify_staff_new_ticket(db, ticket)
     if is_approval:
@@ -969,6 +956,14 @@ async def _handle_user_text(
     db.commit()
 
     conv = conversation_service.get_active(db, "user", None, line_user_id)
+
+    # เพิ่งกด "ไม่อนุมัติ" ไป → ข้อความนี้คือเหตุผล (ต้องดักก่อน flow อื่นทั้งหมด)
+    if await _handle_approval_reason(db, line_user_id, reply_token, text):
+        return
+
+    # ถูกถามว่าหัวหน้าคือใคร → ข้อความนี้คือชื่อหัวหน้า (ดักก่อน intake ไม่งั้นจะกลายเป็นเคสใหม่)
+    if await _handle_approver_pick(db, line_user_id, reply_token, text):
+        return
 
     # ข้อความหน้าตาเป็นรหัสพนักงาน/อีเมล → ลงทะเบียน/แก้การผูกพนักงาน
     # (ทำก่อนเช็ก staff เพราะเป็นทางที่ auto-link บัญชี staff เข้ากับ LINE)
@@ -1025,7 +1020,7 @@ async def _handle_followup_quickreply(
         followup_service.mark_responded(db, ticket.id)
         db.commit()
         db.refresh(ticket)
-        await _notify_group(db, ticket_service.group_notify_text(ticket))
+        await _notify_group_ticket(db, ticket)
     elif ticket:
         followup_service.mark_responded(db, ticket.id)
         db.commit()

@@ -8,6 +8,7 @@ itamtv เก็บ state ฝั่ง server ผ่าน session — submit �
 ด้วย cookie เดียวกัน + ส่งต่อ __VIEWSTATE จาก response ก่อนหน้า:
 GET → postback เลือกผู้แจ้ง (ddlforemp) → postback เลือกประเภท (ddltype) → กด BtnSave
 """
+import asyncio
 import html
 import logging
 import re
@@ -165,6 +166,36 @@ def _pick_subtype(page: str, ddltype: str) -> str | None:
     return opts[0][0] if opts else None
 
 
+async def _choose_type(page: str, category: str | None, title: str, detail: str) -> str:
+    """เลือก "ประเภทปัญหา" จากตัวเลือกจริง — AI ก่อน แล้ว fallback เป็น map ตาม category.
+
+    เดิม map จาก category ตรงๆ ทำให้ account/service_request/equipment_request/other
+    ตกไปเป็น "Unknown" หมด
+    """
+    fallback = _TYPE_MAP.get(category or "", "4")
+    opts = [(v, t) for v, t in _options(page, "ddltype") if t.strip() and t != "Unknown"]
+    if not opts:
+        return fallback
+    from app.services import ai_service
+
+    picked = await ai_service.pick_option("ประเภทปัญหา", opts, title, detail)
+    return picked or fallback
+
+
+async def _choose_subtype(page: str, ddltype: str, title: str, detail: str) -> str:
+    """เลือก "ระบุปัญหา" จากรายการจริงของประเภทนั้น — AI ก่อน แล้ว fallback เป็น "อื่นๆ".
+
+    ช่องนี้คือสิ่งที่ทำให้รายงานแยกประเภทของ IT ใช้งานได้ — เดิมยัด "อื่นๆ" ทุกใบ
+    """
+    opts = [(v, t) for v, t in _options(page, "ddlsubtype") if t.strip()]
+    if not opts:
+        return ""
+    from app.services import ai_service
+
+    picked = await ai_service.pick_option("ระบุปัญหา (อาการที่เจอ)", opts, title, detail)
+    return picked or _pick_subtype(page, ddltype) or ""
+
+
 def _multipart(fields: dict) -> tuple[bytes, str]:
     boundary = uuid.uuid4().hex
     body = b""
@@ -182,12 +213,26 @@ def _multipart(fields: dict) -> tuple[bytes, str]:
     return body, "multipart/form-data; boundary=" + boundary
 
 
+def _addjob_url(token: str | None = None) -> str:
+    """URL หน้า AddJob โดยสวม token ของช่างคนที่สั่ง (ไม่ส่ง = ใช้ token ตั้งต้นใน .env).
+
+    token ใน query string คือ "ตัวตนผู้บันทึก" ของ itamtv — ใช้ token กลางตัวเดียว
+    เคสทุกใบจะขึ้นชื่อเจ้าของ token นั้นหมด และช่างคนอื่นแตะเคสไม่ได้.
+    """
+    url = get_settings().ITAMTV_ADDJOB_URL
+    if not token:
+        return url
+    root, _, _q = url.partition("?")
+    return f"{root}?{token}"
+
+
 async def _submit_case(
     *, emp_code: str | None, full_name: str, department: str | None,
     category: str | None, location: str, note: str, phone: str = "",
+    token: str | None = None, title: str = "", detail: str = "",
 ) -> str:
     """เดิน 4 ขั้นเปิดเคสใน itamtv — คืนข้อความผลลัพธ์ (raise เมื่อพลาด)."""
-    url = get_settings().ITAMTV_ADDJOB_URL
+    url = _addjob_url(token)
     if not url:
         raise RuntimeError("ITAMTV_ADDJOB_URL not configured")
 
@@ -196,8 +241,13 @@ async def _submit_case(
 
         emp_value = _pick_employee(page, emp_code, full_name)
         if not emp_value:
-            raise RuntimeError(f"ไม่พบผู้แจ้ง '{full_name}' ใน dropdown itamtv")
-        ddltype = _TYPE_MAP.get(category or "", "4")
+            raise RuntimeError(
+                f"ไม่พบผู้แจ้ง '{full_name}' ใน dropdown itamtv"
+                if full_name
+                else "ไม่รู้ชื่อจริงของผู้แจ้ง (ยังไม่ได้ลงทะเบียนกับทะเบียนพนักงาน)"
+            )
+        # ประเภทปัญหา: ให้ AI เลือกจากตัวเลือกจริง (ตกไป map ตาม category ถ้า AI ล่ม)
+        ddltype = await _choose_type(page, category, title, detail)
         base = {
             "ctl00_ToolkitScriptManager1_HiddenField": "",
             "__EVENTTARGET": "", "__EVENTARGUMENT": "",
@@ -208,7 +258,7 @@ async def _submit_case(
             "ctl00$ContentPlaceHolder1$ddlforemp": emp_value,
             "ctl00$ContentPlaceHolder1$ddlforsec": _pick_section(page, department) or "",
             "ctl00$ContentPlaceHolder1$ddltype": ddltype,
-            "ctl00$ContentPlaceHolder1$ddlsubtype": _pick_subtype(page, ddltype) or "",
+            "ctl00$ContentPlaceHolder1$ddlsubtype": "",  # เลือกหลัง postback (ดูด้านล่าง)
             "ctl00$ContentPlaceHolder1$Txtobj": location[:250],
             "ctl00$ContentPlaceHolder1$Txtnote": note[:2000],
         }
@@ -226,6 +276,10 @@ async def _submit_case(
 
         page = await post(page, {"__EVENTTARGET": "ctl00$ContentPlaceHolder1$ddlforemp"})
         page = await post(page, {"__EVENTTARGET": "ctl00$ContentPlaceHolder1$ddltype"})
+        # รายการ "ระบุปัญหา" ถูกกรองตามประเภทหลัง postback → เลือกจากลิสต์ล่าสุดเสมอ
+        base["ctl00$ContentPlaceHolder1$ddlsubtype"] = await _choose_subtype(
+            page, ddltype, title, detail
+        )
         page = await post(page, {"ctl00$ContentPlaceHolder1$BtnSave": "บันทึกข้อมูล"})
 
     alerts = re.findall(r"alert\('([^']*)'\)", page)
@@ -234,27 +288,31 @@ async def _submit_case(
     return alerts[0]
 
 
-def _base_url() -> tuple[str, str]:
+def _base_url(token: str | None = None) -> tuple[str, str]:
     """(โคน URL, token query) — ตัดชื่อไฟล์ AddJob.aspx ออกจาก ITAMTV_ADDJOB_URL."""
-    url = get_settings().ITAMTV_ADDJOB_URL
+    url = _addjob_url(token)
     m = re.match(r"(.*/)[^/?]+\?(.*)$", url)
     return (m.group(1), m.group(2)) if m else (url, "")
 
 
-async def find_job_no(ticket_no: str) -> str | None:
-    """หาเลขเคส itamtv จากหน้ารายการงานค้าง โดยดูจาก marker [TK-...] ที่เราใส่ไว้ใน note."""
-    root, token = _base_url()
+async def find_job_no(ticket_no: str, token: str | None = None) -> str | None:
+    """หาเลขเคส itamtv จากหน้ารายการงานค้าง โดยดูจาก marker [TK-...] ที่เราใส่ไว้ใน note.
+
+    ต้องใช้ token เดียวกับตอนเปิดเคส — หน้างานค้างแสดงเฉพาะเคสของบัญชีนั้น.
+    """
+    root, token = _base_url(token)
     async with httpx.AsyncClient(timeout=15) as client:
         page = (await client.get(f"{root}fixremind.aspx?{token}")).text
-    # แถวในตารางเรียง: <a ...>JOBNO</a> ... [TK-xxx] — หา job no ตัวที่อยู่ก่อน marker ของเรา
-    best = None
-    for m in re.finditer(r">\s*<b>([A-Z]{2}\d+)</b>", page):
-        best_candidate = m.group(1)
-        tail = page[m.end(): m.end() + 3000]
-        if f"[{ticket_no}]" in tail:
-            best = best_candidate
-            break
-    return best
+    # แถวในตารางเรียง: <b>JOBNO</b> ... [TK-xxx] — จับคู่เฉพาะ "ภายในแถวเดียวกัน" คือ
+    # ตั้งแต่เลขเคสนี้ถึงเลขเคสของแถวถัดไป. ห้ามใช้หน้าต่างความยาวคงที่ (เดิม 3000 ตัวอักษร)
+    # เพราะมันล้นข้ามไปแถวถัดไป → คืนเลขเคสของแถวก่อนหน้า ทำให้ ticket คนละใบถือเลขเดียวกัน
+    # แล้วสั่งปิดทีไรไปโดนเคสของคนอื่น
+    marks = list(re.finditer(r">\s*<b>([A-Z]{2}\d+)</b>", page))
+    for i, m in enumerate(marks):
+        row_end = marks[i + 1].start() if i + 1 < len(marks) else len(page)
+        if f"[{ticket_no}]" in page[m.end():row_end]:
+            return m.group(1)
+    return None
 
 
 async def cancel_case(job_no: str) -> str:
@@ -325,7 +383,8 @@ def _current_status(page: str) -> str:
 
 
 async def _save_status(client: httpx.AsyncClient, url: str, page: str, *,
-                       status: str, people_code: str | None, note: str | None) -> str:
+                       status: str, people_code: str | None, note: str | None,
+                       level: str | None = None) -> str:
     """POST หน้า display หนึ่งครั้ง โดย override ddlstatus/ddlpeople/Txtnote2.
 
     ต้องส่ง field ตามลำดับ DOM เป๊ะ (server อ่านแบบอิง index) — คืน alert ที่ได้.
@@ -343,6 +402,8 @@ async def _save_status(client: httpx.AsyncClient, url: str, page: str, *,
             value = people_code
         elif short == "Txtnote2" and note:
             value = note
+        elif short == "ddllv" and level:
+            value = level
         if kind == "file":
             parts.append(
                 ('--%s\r\nContent-Disposition: form-data; name="%s"; filename=""\r\n'
@@ -366,7 +427,7 @@ async def _save_status(client: httpx.AsyncClient, url: str, page: str, *,
 
 
 async def complete_case(job_no: str, token: str, people_code: str | None = None,
-                        note: str | None = None) -> str:
+                        note: str | None = None, level: str | None = None) -> str:
     """ปิดเคส = เซ็ต ddlstatus='ดำเนินการเรียบร้อย' (6) ในระบบ itamtv โดยใช้ token ช่าง.
 
     เคสสด (สถานะ 'รอจัดคิว'=0, ยังไม่มีผู้รับผิดชอบ) กระโดดเป็น 6 ตรงๆ ไม่ได้ (server
@@ -390,11 +451,11 @@ async def complete_case(job_no: str, token: str, people_code: str | None = None,
         # สเต็ป 1: ยังไม่ 'กำลังดำเนินการ' → assign + set 1 ก่อน (กัน error กระโดดสถานะ)
         if _current_status(page) != "1":
             await _save_status(client, url, page, status="1",
-                               people_code=people_code, note=note)
+                               people_code=people_code, note=note, level=level)
             page = (await client.get(url)).text
         # สเต็ป 2: ปิดเป็น 'ดำเนินการเรียบร้อย'
         return await _save_status(client, url, page, status=_STATUS_DONE,
-                                  people_code=people_code, note=note)
+                                  people_code=people_code, note=note, level=level)
 
 
 # สถานะ ticket ฝั่งเรา → ddlstatus ของ itamtv (เฉพาะที่หน้าเคสตั้งได้: 0/1/6)
@@ -403,14 +464,16 @@ ITAMTV_TO_STATUS = {"0": "open", "1": "in_progress", "6": "resolved"}
 
 
 async def set_status(job_no: str, token: str, target: str, *,
-                     people_code: str | None = None, note: str | None = None) -> str:
+                     people_code: str | None = None, note: str | None = None,
+                     level: str | None = None) -> str:
     """เซ็ต ddlstatus ของเคส itamtv เป็นค่า target ('0'|'1'|'6') ด้วย token ช่าง.
 
     การไปถึง '6' (ดำเนินการเรียบร้อย) จากเคสสด ต้องผ่าน '1' ก่อน — delegate ให้
     complete_case ที่จัดการ 2 สเต็ปไว้แล้ว.
     """
     if target == _STATUS_DONE:
-        return await complete_case(job_no, token, people_code=people_code, note=note)
+        return await complete_case(job_no, token, people_code=people_code, note=note,
+                                   level=level)
     root, _ = _base_url()
     url = f"{root}Addjob.aspx?{token}&mode=display&Id={job_no}"
     async with httpx.AsyncClient(timeout=30) as client:
@@ -420,7 +483,7 @@ async def set_status(job_no: str, token: str, target: str, *,
         if _current_status(page) == target:
             return "สถานะตรงอยู่แล้ว"
         return await _save_status(client, url, page, status=target,
-                                  people_code=people_code, note=note)
+                                  people_code=people_code, note=note, level=level)
 
 
 async def read_status(job_no: str, token: str) -> str | None:
@@ -495,19 +558,33 @@ def _multipart_no_upload(fields: dict) -> tuple[bytes, str]:
 # entry point — เรียกหลังเปิด ticket ใน dashboard แล้ว
 # ---------------------------------------------------------------------------
 
+def _job_no_taken(db: Session, job_no: str, ticket_id: int) -> bool:
+    """เลขเคส itamtv นี้ถูก ticket ใบอื่นถือไว้แล้วหรือยัง."""
+    return db.query(Ticket.id).filter(
+        Ticket.itamtv_job_no == job_no, Ticket.id != ticket_id
+    ).first() is not None
+
+
 def _add_note(db: Session, ticket: Ticket, content: str) -> None:
     db.add(TicketComment(ticket_id=ticket.id, content=content, is_internal=True))
     db.commit()
 
 
-async def mirror_ticket(db: Session, ticket: Ticket, lu: LineUser | None) -> None:
+async def mirror_ticket(
+    db: Session, ticket: Ticket, lu: LineUser | None, token: str | None = None
+) -> None:
     """เปิดเคสคู่ขนานใน itamtv + แนบข้อมูลเครื่องผู้แจ้งเป็น internal comment.
+
+    token = token ส่วนตัวของช่างที่เป็นผู้บันทึกเคส (ผู้แจ้งจริงอยู่ที่ ddlforemp).
+    ไม่ส่ง = ใช้ token ตั้งต้นใน .env — เลี่ยง เพราะเคสจะขึ้นชื่อเจ้าของ token นั้น.
 
     best-effort ทั้งฟังก์ชัน — error ใดๆ log + บันทึกไว้ใน comment แล้วจบ.
     """
     if not settings_service.get("ITAMTV_ENABLED"):
         return
-    full_name = ((lu.emp_name if lu else None) or (lu.display_name if lu else "")) or ""
+    # ชื่อที่ใช้ระบุตัวผู้แจ้งใน itamtv ต้องเป็นชื่อจริงเท่านั้น (ยืนยันกับ Employee DB
+    # หรือที่ผู้แจ้งพิมพ์บอกเอง) — display_name เป็นชื่อเล่นใน LINE ยัดเข้าไปก็หาไม่เจอ
+    full_name = ((lu.emp_name if lu else None) or (lu.self_name if lu else None)) or ""
 
     # ผูกพนักงานไว้แล้ว → exact lookup สด (ได้ phone/department ล่าสุด) ก่อน fallback ค้นชื่อ
     emp = None
@@ -532,11 +609,29 @@ async def mirror_ticket(db: Session, ticket: Ticket, lu: LineUser | None) -> Non
         except Exception:  # noqa: BLE001
             logger.exception("fetch assets failed for %s", full_name)
 
+    # ชั้น/สถานที่ เป็นช่องบังคับของ itamtv — ไล่หาจากทุกแหล่งก่อนยอมแพ้
+    # (เดิมได้ "-" ทุกครั้งที่เคสมาจาก auto-escalate เพราะไม่เคยผ่านขั้นถามตึก/ชั้น)
+    building = (lu.building if lu else None) or (emp or {}).get("building")
+    floor = (lu.floor if lu else None) or (emp or {}).get("floor")
     location = " ".join(
-        p for p in ((lu.building if lu else None), (f"ชั้น {lu.floor}" if lu and lu.floor else None))
-        if p
-    ) or "-"
-    note = f"[{ticket.ticket_no}] {ticket.title}\n{ticket.description or ''}"
+        p for p in (building, f"ชั้น {floor}" if floor else None) if p
+    ) or ticket.reporter_detail or "ไม่ระบุ — รบกวนติดต่อผู้แจ้ง"
+
+    # เบอร์ติดต่อ: Employee DB ก่อน แล้วค่อยเบอร์ที่ผู้แจ้งบอกบอทไว้เอง
+    phone = (emp or {}).get("phone") or (lu.phone if lu else None) or ""
+
+    # ประเมิน Level SLA จากอาการ (ครั้งเดียว เก็บไว้ใช้ตอน set_status → ddllv)
+    if not ticket.itamtv_level:
+        from app.services import ai_service
+
+        level = await ai_service.estimate_level(
+            ticket.title, ticket.description or "", ticket.priority
+        )
+        if level:
+            ticket.itamtv_level = level
+            db.commit()
+
+    note = _case_note(ticket, lu, emp, location, phone)
     try:
         msg = await _submit_case(
             emp_code=(emp or {}).get("emp_code"),
@@ -545,13 +640,26 @@ async def mirror_ticket(db: Session, ticket: Ticket, lu: LineUser | None) -> Non
             category=ticket.category,
             location=location,
             note=note,
-            phone=(emp or {}).get("phone") or "",
+            phone=phone,
+            token=token,
+            title=ticket.title,
+            detail=ticket.description or "",
         )
         job_no = None
         try:
-            job_no = await find_job_no(ticket.ticket_no)
+            job_no = await find_job_no(ticket.ticket_no, token)
         except Exception:  # noqa: BLE001
             logger.exception("find itamtv job no failed for %s", ticket.ticket_no)
+        if job_no and _job_no_taken(db, job_no, ticket.id):
+            # กันซ้ำอีกชั้น: เลขนี้เป็นของ ticket ใบอื่นอยู่แล้ว = จับคู่ผิดแน่ๆ อย่าเก็บ
+            # (ยอมไม่มีเลขเคส ดีกว่าไปสั่งปิดเคสของคนอื่น)
+            logger.error("itamtv job %s ถูกใช้โดย ticket ใบอื่นแล้ว — ไม่ผูกกับ %s",
+                         job_no, ticket.ticket_no)
+            _add_note(db, ticket, (
+                f"⚠️ จับเลขเคส itamtv ไม่ได้ (เลข {job_no} ซ้ำกับเคสอื่น) — "
+                "รบกวนใส่เลขเคสเองในระบบด้วยครับ"
+            ))
+            job_no = None
         if job_no:
             ticket.itamtv_job_no = job_no  # เก็บไว้ใช้สั่งปิดเคสทีหลัง
             db.commit()
@@ -560,3 +668,46 @@ async def mirror_ticket(db: Session, ticket: Ticket, lu: LineUser | None) -> Non
     except Exception as exc:  # noqa: BLE001
         logger.exception("itamtv mirror failed for %s", ticket.ticket_no)
         _add_note(db, ticket, f"⚠️ เปิดเคสใน itamtv ไม่สำเร็จ: {exc} — รบกวนเปิดในระบบเองด้วยครับ")
+
+
+def _case_note(ticket: Ticket, lu: LineUser | None, emp: dict | None,
+               location: str, phone: str) -> str:
+    """รายละเอียดใบงาน — ขึ้นต้นด้วยหัวสรุปให้ช่างอ่าน 5 บรรทัดแล้วออกไปทำงานได้เลย
+    แล้วค่อยตามด้วยบทสนทนา/รายละเอียดเต็มไว้เป็นหลักฐานด้านล่าง
+    """
+    reporter = (lu.known_name if lu else None) or ticket.reporter_name or "-"
+    head = [
+        f"[{ticket.ticket_no}] {ticket.title}",
+        f"ผู้แจ้ง: {reporter}"
+        + (f" ({(emp or {}).get('department') or (lu.department if lu else '') or '-'})"),
+        f"ติดต่อ: {phone or 'ไม่ระบุ'}",
+        f"สถานที่: {location}",
+        f"ความเร่งด่วน: {ticket.priority or '-'} · หมวด: {ticket.category or '-'}",
+        "-" * 30,
+    ]
+    return "\n".join(head) + "\n" + (ticket.description or "")
+
+
+async def ensure_mirrored(db: Session, ticket: Ticket, staff: User | None) -> bool:
+    """เคสที่ผู้ใช้แจ้งเข้ามาจะยังไม่ถูกส่งไป itamtv จนกว่าจะมีช่างมารับงาน —
+    ฟังก์ชันนี้เรียกตอนรับงาน/เปลี่ยนสถานะ เพื่อเปิดเคสด้วย token ของช่างคนนั้น.
+
+    คืน True ถ้า ticket มีเลขเคส itamtv แล้ว (เปิดใหม่สำเร็จ หรือมีอยู่ก่อน).
+    """
+    if ticket.itamtv_job_no:
+        return True
+    if not settings_service.get("ITAMTV_ENABLED"):
+        return False
+    if staff is None or not staff.itamtv_token:
+        _add_note(db, ticket, (
+            "⚠️ ยังไม่ได้เปิดเคสใน itamtv — ช่างที่รับงานยังไม่ได้ผูก itamtv token "
+            "(ตั้งได้ที่หน้า Profile หรือ Users)"
+        ))
+        return False
+    lu = ticket.line_user
+    if lu is None and ticket.reporter_name:
+        # เคสที่ staff/หัวหน้างานเปิดแทนผู้แจ้งทางโทรศัพท์ — ไม่มี LineUser ผูกไว้
+        # สร้าง object ชั่วคราว (ไม่ add เข้า session) ให้ mirror ไป lookup ต่อจากชื่อ
+        lu = LineUser(line_user_id="", emp_name=ticket.reporter_name)
+    await mirror_ticket(db, ticket, lu, token=staff.itamtv_token)
+    return bool(ticket.itamtv_job_no)

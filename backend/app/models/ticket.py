@@ -22,6 +22,8 @@ class Ticket(Base):
     ai_response: Mapped[str | None] = mapped_column(Text)
     # เลขเคสในระบบ itamtv ที่เปิดคู่ขนานไว้ — ใช้สั่งปิด/อัปเดตสถานะทีหลัง
     itamtv_job_no: Mapped[str | None] = mapped_column(String(30))
+    # ระดับ SLA (Level 1-4) ที่ AI ประเมินจากอาการ → itamtv ddllv (1=30น. 2=2ชม. 3=1วัน 4=Open)
+    itamtv_level: Mapped[str | None] = mapped_column(String(1))
     # ครั้งล่าสุดที่บอทตามถามความคืบหน้าจากช่างที่รับงาน (in_progress) ทาง LINE —
     # scheduler ใช้เว้นจังหวะทุก STAFF_PROGRESS_MINUTES นาที
     staff_progress_ping_at: Mapped[datetime | None] = mapped_column(DateTime)

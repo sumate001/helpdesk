@@ -9,6 +9,8 @@ class LineUserOut(BaseModel):
     id: int
     line_user_id: str
     display_name: str | None = None
+    # ชื่อที่ดีที่สุดที่มี (Employee DB > ที่ผู้แจ้งบอกเอง > ชื่อเล่นใน LINE)
+    known_name: str | None = None
     department: str | None = None
     building: str | None = None
     floor: str | None = None
@@ -83,6 +85,7 @@ class TicketOut(BaseModel):
     category: str | None = None
     type: str | None = None
     priority: str | None = None
+    itamtv_level: str | None = None
     status: str
     assigned_to: int | None = None
     ai_response: str | None = None

@@ -11,7 +11,7 @@ import re
 
 import httpx
 
-from app.services import settings_service
+from app.services import settings_service, staff_agent
 
 logger = logging.getLogger(__name__)
 
@@ -55,7 +55,7 @@ def _strip_images(messages: list[dict]) -> bool:
     return had
 
 
-async def _post_chat(messages: list[dict]) -> str:
+async def _post_chat(messages: list[dict], schema: dict | None = None) -> str:
     """ยิง /api/chat. ถ้าโมเดลไม่รองรับรูป (multimodal) → ลบรูปแล้วลองใหม่ด้วย text
     ล้วน แทนที่จะ error (ไม่งั้น intake จะตกไป fallback = เปิดเคสทุกครั้ง).
     """
@@ -64,7 +64,9 @@ async def _post_chat(messages: list[dict]) -> str:
         "model": settings_service.get("OLLAMA_MODEL"),
         "messages": messages,
         "stream": False,
-        "format": "json",
+        # schema = structured outputs: บังคับทั้ง "เป็น JSON" และ "ฟิลด์/ค่าที่ใช้ได้"
+        # (ไม่ส่ง schema → ได้แค่ JSON เปล่าๆ แบบเดิม)
+        "format": schema or "json",
         "think": False,  # บางโมเดลเป็น thinking model — ปิด think งานเรา (classify+ตอบสั้น) เร็วขึ้นมาก
         "keep_alive": "30m",  # คาโมเดลไว้ใน VRAM กัน cold-load ตอน user ทักจริง
         "options": {"temperature": 0.3},
@@ -83,8 +85,32 @@ async def _post_chat(messages: list[dict]) -> str:
         return resp.json()["message"]["content"]
 
 
+async def _post_chat_tools(messages: list[dict], tools: list[dict]) -> dict:
+    """ยิง /api/chat แบบ native tool-calling — คืน message dict ทั้งก้อน
+    ({"content": ..., "tool_calls": [...]}).
+
+    ต่างจาก _post_chat: ไม่ส่ง format=json (โมเดลต้องเลือกเองว่าจะตอบข้อความหรือเรียก tool)
+    และ schema ของ args ถูกบังคับด้วย JSON Schema แทนการเขียนกฎในพรอมป์ต
+    """
+    url = f"{settings_service.get('OLLAMA_BASE_URL')}/api/chat"
+    payload = {
+        "model": settings_service.get("OLLAMA_MODEL"),
+        "messages": messages,
+        "tools": tools,
+        "stream": False,
+        "think": False,
+        "keep_alive": "30m",
+        "options": {"temperature": 0.3},
+    }
+    async with httpx.AsyncClient(timeout=120) as client:
+        resp = await client.post(url, json=payload)
+        resp.raise_for_status()
+        return resp.json()["message"]
+
+
 async def _ollama_chat_messages(
-    system: str, history: list[dict], images: list[bytes] | None = None
+    system: str, history: list[dict], images: list[bytes] | None = None,
+    schema: dict | None = None,
 ) -> str:
     """chat แบบ multi-turn — history = [{role, content}, ...]; images แนบที่ turn ล่าสุด."""
     messages: list[dict] = [{"role": "system", "content": system}]
@@ -92,7 +118,7 @@ async def _ollama_chat_messages(
         messages.append({"role": m["role"], "content": m["content"]})
     if images and messages[-1]["role"] == "user":
         messages[-1]["images"] = [base64.b64encode(b).decode() for b in images]
-    return await _post_chat(messages)
+    return await _post_chat(messages, schema)
 
 
 _MD_HEADER_RE = re.compile(r"^\s{0,3}#{1,6}\s*", re.MULTILINE)
@@ -193,6 +219,12 @@ B) ต้องให้ทีม IT ลงมือ (L2) หรือเป็�
 
 [ข้อมูลผู้แจ้ง — ทุกเคส]
   - ชื่อ-นามสกุล (full_name), อาคาร (building), ชั้น (floor)
+  - รหัสพนักงานหรืออีเมลบริษัท (emp_code) — ถามเฉพาะเมื่อ "สถานะลงทะเบียน" ด้านล่างบอกว่า
+    ยังไม่ได้ลงทะเบียน ให้ถามรวมไปในคำถามเดียวกับชื่อ/อาคาร/ชั้น เช่น "ขอชื่อ-นามสกุล
+    กับรหัสพนักงาน (หรืออีเมลบริษัท) ด้วยครับ" — ระบบต้องใช้ระบุตัวผู้แจ้งให้ถูกคน
+    เพราะชื่อใน LINE เป็นชื่อเล่นที่ตั้งเองได้ ใช้แทนกันไม่ได้
+    ผู้ใช้ไม่ยอมบอก/บอกว่าจำไม่ได้ → ไม่ต้องคะยั้นคะยอ ขอแค่ชื่อ-นามสกุลจริงแล้วเดินต่อ
+    ลงทะเบียนแล้ว (✅) → ห้ามถามรหัสพนักงานเด็ดขาด ระบบรู้อยู่แล้ว
 
 [ข้อมูลที่ช่างต้องใช้ — เลือกถามเฉพาะที่ "เกี่ยวกับปัญหานี้" และ "ยังไม่รู้จากที่ผู้ใช้เล่ามา" อย่าถามครบทุกข้อพร่ำเพรื่อ]
 ปัญหาฮาร์ดแวร์/อุปกรณ์/เน็ตเวิร์ก/ซอฟต์แวร์ (กลุ่ม B ที่ต้องซ่อม/แก้):
@@ -217,7 +249,8 @@ B) ต้องให้ทีม IT ลงมือ (L2) หรือเป็�
 ห้ามแยก "สรุป" กับ "ปุ่มยืนยัน" เป็นคนละ turn — ต้องอยู่ใน turn เดียวกัน
 *** ห้ามถามคำถามอื่นปนอยู่ในเทิร์นเดียวกับที่สรุป+ขอยืนยันเปิด Ticket (needs_confirm=true) — เทิร์นนั้นต้องมีคำถามเดียวคือ "ยืนยันเปิด Ticket ไหม" เท่านั้น ถ้ายังมีอะไรต้องถามเพิ่ม (อาการ/ข้อมูล/วินิจฉัย) ให้ถามให้จบก่อน แล้วค่อยสรุป+ยืนยันในเทิร์นถัดไป ***
 ผู้ใช้ยืนยัน (เช่น "เปิดเลย","ใช่",กดปุ่ม) → action="open"
-ผู้ใช้บอกว่าหายเองแล้ว → action="resolved"
+ผู้ใช้บอกว่าหายเองแล้ว → action="resolved" — ⚠️ ใช้เฉพาะเมื่อ "เคยมีปัญหา IT จริง" ในบทสนทนานี้เท่านั้น
+  ถ้าผู้ใช้แค่ทักทาย/คุยเล่น/ขอให้ตามคนให้/ขอบคุณ โดยไม่เคยมีปัญหาให้แก้ → action="ask" ตอบสั้นๆ (ห้าม resolved)
 
 ถ้าส่วน "ข้อมูลผู้ใช้ที่ทราบแล้ว" ด้านล่างมีครบ (ชื่อ+อาคาร+ชั้น) และรายละเอียดปัญหาพอแล้ว → ข้ามไปขั้นยืนยันได้เลย ห้ามถามข้อมูลซ้ำ
 
@@ -258,14 +291,16 @@ equipment_request/service_request: ไม่ต้อง troubleshoot — ถา
 
 ภาษาไทย กระชับ สุภาพ. ถ้ามีรูปแนบให้ดูรูปประกอบการวิเคราะห์.
 
-category: hardware, software, network, account, service_request, equipment_request, other
-priority: low, medium, high, critical | type: L1 หรือ L2
-
-ตอบกลับเป็น JSON เท่านั้น:
-{"reply":"ข้อความถึงผู้ใช้ (ภาษาไทย กระชับ)","action":"ask|resolved|open","needs_confirm":false,"category":"...","priority":"...","type":"L2","title":"หัวข้อสั้นๆ","description":"สรุปให้ช่างทำงานต่อได้ทันที","full_name":null,"building":null,"floor":null,"item_name":null,"quantity":1}
+[ฟิลด์ที่ต้องเติม]
+- reply = ข้อความถึงผู้ใช้ (ภาษาไทย กระชับ) / action = ask, resolved หรือ open
 - ใส่ category/priority/type/title/description ให้ครบเมื่อ action=open หรือ resolved
 - description ต้องเขียนให้ช่าง IT หยิบไปทำต่อได้เลย รวบรวมจากบทสนทนาทั้งหมด: อาการ/ปัญหา, อุปกรณ์-รุ่น-asset tag, ข้อความ error, เวลาที่เริ่ม, ขอบเขตผลกระทบ, สิ่งที่ลองแก้แล้ว + ชื่อผู้แจ้ง/อาคาร/ชั้น (อย่าใส่แค่ประโยคเดียวลอยๆ)
-- full_name/building/floor ใส่เมื่อทราบ (จากผู้ใช้หรือจากข้อมูลที่ทราบแล้ว) ไม่งั้น null"""
+- full_name/phone/building/floor ใส่เมื่อทราบ (จากผู้ใช้หรือจากข้อมูลที่ทราบแล้ว) ไม่งั้น null
+- full_name ต้องเป็น "ชื่อจริง-นามสกุล" ที่ผู้ใช้พิมพ์บอกมาเองเท่านั้น ห้ามเดา ห้ามเอาชื่อเล่น
+  หรือชื่อบัญชี LINE มาใส่ — ยังไม่รู้ก็ใส่ null แล้วถามเอา
+- emp_code = รหัสพนักงาน/อีเมลบริษัทที่ผู้ใช้พิมพ์มา (ใส่ค่าที่เขาพิมพ์ตรงๆ) ไม่มีก็ null
+- ตอนถามชื่อ/ตึก/ชั้นเพื่อเปิดเคส ให้ถาม "เบอร์ติดต่อกลับ" ไปในคำถามเดียวกันด้วย
+  (ช่างต้องโทรนัดเวลาเข้าไปดู) — ถ้าระบบทราบเบอร์อยู่แล้วห้ามถามซ้ำ"""
 
 # ต่อท้าย system prompt เมื่อ TICKET_CONFIRM_REQUIRED ปิด — ทับกฎยืนยันด้านบนทั้งหมด
 NO_CONFIRM_BLOCK = """
@@ -277,6 +312,35 @@ NO_CONFIRM_BLOCK = """
 - ยังขาดข้อมูล → action="ask" ถามเฉพาะที่ขาดตามกฎเดิม"""
 
 VALID_ACTIONS = {"ask", "resolved", "open"}
+
+# structured outputs: บังคับรูปร่างผลลัพธ์ intake ด้วย JSON Schema แทนการเขียนกฎในพรอมป์ต
+# (โมเดลลืมฟิลด์/ใส่ category มั่วไม่ได้อีก — Ollama บังคับตอนถอดรหัสเลย)
+_NULLABLE_STR = {"type": ["string", "null"]}
+
+
+def _intake_schema(allow_ignore: bool = False) -> dict:
+    actions = sorted(VALID_ACTIONS | ({"ignore"} if allow_ignore else set()))
+    return {
+        "type": "object",
+        "properties": {
+            "reply": {"type": "string"},
+            "action": {"type": "string", "enum": actions},
+            "needs_confirm": {"type": "boolean"},
+            "category": {"type": "string", "enum": sorted(VALID_CATEGORIES)},
+            "priority": {"type": "string", "enum": sorted(VALID_PRIORITIES)},
+            "type": {"type": "string", "enum": ["L1", "L2"]},
+            "title": {"type": "string"},
+            "description": {"type": "string"},
+            "full_name": _NULLABLE_STR,
+            "emp_code": _NULLABLE_STR,
+            "phone": _NULLABLE_STR,
+            "building": _NULLABLE_STR,
+            "floor": _NULLABLE_STR,
+            "item_name": _NULLABLE_STR,
+            "quantity": {"type": ["integer", "null"]},
+        },
+        "required": ["reply", "action", "needs_confirm"],
+    }
 
 CONFIRM_OPEN_TEXT = "เปิด Ticket ✅"  # ข้อความจากปุ่ม quick reply "confirm"
 
@@ -450,6 +514,7 @@ def _known_info_block(known: dict | None) -> str:
         ("แผนก", "department"),
         ("อาคาร", "building"),
         ("ชั้น", "floor"),
+        ("เบอร์ติดต่อ", "phone"),
     ):
         val = known.get(key)
         if val:
@@ -532,7 +597,9 @@ async def intake_turn(
     if allow_ignore:
         system += IGNORE_BLOCK
     try:
-        raw = await _ollama_chat_messages(system, history, images)
+        raw = await _ollama_chat_messages(
+            system, history, images, schema=_intake_schema(allow_ignore)
+        )
         result = _parse_json(raw)
     except (httpx.HTTPError, json.JSONDecodeError, KeyError) as exc:
         if allow_ignore:
@@ -611,89 +678,245 @@ async def intake_turn(
 
 
 # --------------------------------------------------------------------------
-# โหมดผู้ช่วยสำหรับ IT Staff — คุยได้ไม่จำกัด + เรียกเครื่องมือดูข้อมูล/สั่งการเคส
+# จัดหมวดเคสให้ตรงกับ dropdown จริงของ itamtv
 # --------------------------------------------------------------------------
 
-STAFF_TOOLS = {
-    "search_tickets": "ค้นหาเคส — args: status(open|pending_approval|in_progress|resolved|closed, ไม่ใส่=ทุกสถานะ), assignee('me'=เฉพาะเคสของฉัน), query(คำค้นในหัวข้อ/รายละเอียด/เลขเคส)",
-    "get_ticket": "ดูรายละเอียดเคสเดียว — args: ticket_no (เช่น TK-20260721-0001)",
-    "search_employees": "ค้นพนักงานจากชื่อ/คำค้น คืนรายชื่อที่เจอทั้งหมด (ชื่อจริง/รหัส/แผนก) — args: query. ใช้ตอบ 'มีคนชื่อ...กี่คน / ชื่อจริงว่าอะไร'",
-    "list_assets": "ดูอุปกรณ์ที่พนักงานคนหนึ่งถือครอง — args: emp_code(รหัสพนักงาน) หรือ name(ชื่อ)",
-    "set_status": "เปลี่ยนสถานะเคส — args: ticket_no, status(in_progress|resolved) — sync itamtv ให้อัตโนมัติ",
-    "create_ticket": "เปิดเคสแทนผู้ใช้ที่โทร/เดินมาแจ้ง — args: reporter_emp_code หรือ reporter_name(ผู้แจ้ง), title, description, category(hardware|software|network|account|service_request|equipment_request|other), priority(low|medium|high|critical), building, floor(ถ้ามี). เคสจะ assign ให้ตัวคุณ (staff คนที่สั่ง) + สถานะ in_progress อัตโนมัติ",
-}
+_PICK_PROMPT = """คุณเป็นเจ้าหน้าที่ IT ที่กรอกใบแจ้งซ่อมในระบบ e-Helpdesk ของบริษัท
+อ่านเรื่องที่ผู้ใช้แจ้ง แล้วเลือก "%(what)s" ที่ตรงที่สุดจากรายการที่ระบบมีให้
+
+รายการที่เลือกได้ (ต้องตอบเป็น id ตัวใดตัวหนึ่งเท่านั้น):
+%(options)s
+
+หลักการเลือก:
+- เลือกตัวที่ตรงกับ "อาการที่ผู้ใช้เจอ" มากที่สุด ไม่ใช่ตรงกับคำที่เขาใช้พูด
+- ไม่มีตัวไหนใกล้เคียงจริงๆ ค่อยเลือกตัวที่เป็น "อื่นๆ"
+- ตอบ JSON: {"id": "<id ที่เลือก>"}"""
+
+
+_HAD_ISSUE_PROMPT = """อ่านบทสนทนาระหว่างผู้ใช้กับบอท IT Support แล้วตัดสินว่า
+"บทสนทนานี้มีปัญหา/คำขอด้าน IT จริงที่บอทได้ช่วยเหลือหรือไม่"
+
+มีปัญหาจริง (true): ผู้ใช้แจ้งอาการเสีย/ใช้งานไม่ได้/ขอความช่วยเหลือด้าน IT
+                     และบอทได้แนะนำวิธีแก้หรือช่วยดำเนินการ
+ไม่มีปัญหาจริง (false): แค่ทักทาย คุยเล่น ขอบคุณ ขอให้บอทตามคน/ฝากข้อความ
+                        หรือเรื่องที่ไม่เกี่ยวกับ IT — บอทไม่ได้แก้ปัญหาอะไร
+
+ตอบ JSON: {"had_issue": true|false}"""
+
+
+async def conversation_had_issue(transcript: list[dict]) -> bool:
+    """บทสนทนานี้เคยมีปัญหา IT จริงที่บอทช่วยไหม — กันสร้างเคสสถิติจากบทสนทนาที่ไม่ใช่ปัญหา.
+
+    ค่าเริ่มต้นเมื่อประเมินไม่ได้ = False (ไม่สร้างเคส) — เคสผีสร้างปัญหามากกว่าเคสสถิติที่หายไปหนึ่งใบ
+    """
+    convo = "\n".join(
+        f"{'ผู้ใช้' if m['role'] == 'user' else 'บอท'}: {m['content']}"
+        for m in transcript if m.get("role") in ("user", "assistant") and m.get("content")
+    )
+    if not convo.strip():
+        return False
+    schema = {"type": "object", "properties": {"had_issue": {"type": "boolean"}},
+              "required": ["had_issue"]}
+    try:
+        raw = await _post_chat(
+            [{"role": "system", "content": _HAD_ISSUE_PROMPT},
+             {"role": "user", "content": convo[:2500]}],
+            schema,
+        )
+        return _as_bool(_parse_json(raw).get("had_issue"))
+    except (httpx.HTTPError, json.JSONDecodeError, KeyError, ValueError) as exc:
+        logger.warning("conversation_had_issue failed: %s", exc)
+        return False
+
+
+_LEVEL_PROMPT = """คุณเป็นหัวหน้าทีม IT ที่ประเมินว่างานแจ้งซ่อมควรได้กรอบเวลาแก้ (SLA) ระดับไหน
+อ่านเรื่องที่แจ้ง แล้วเลือก Level ตามว่า "ควรแก้เสร็จภายในเมื่อไหร่" ตามความรุนแรง/ผลกระทบจริง
+
+Level 1 = ต้องแก้ภายใน 30 นาที — เร่งด่วนมาก งานหยุดชะงักทันที กระทบวงกว้าง
+         (เช่น ระบบออกอากาศล่ม, เครือข่ายทั้งชั้นใช้ไม่ได้, ระบบส่วนกลางล่ม)
+Level 2 = ภายใน 2 ชั่วโมง — เร่ง กระทบการทำงานของคนคนนั้นให้ทำงานไม่ได้
+         (เช่น คอมเปิดไม่ติด, เข้าอีเมล/ระบบงานหลักไม่ได้)
+Level 3 = ภายใน 1 วันทำการ — ปกติ ยังพอทำงานอื่นได้ก่อน
+         (เช่น เครื่องช้า, ปริ้นเตอร์มีปัญหาแต่มีเครื่องอื่นใช้, ตั้งค่าโปรแกรม)
+Level 4 = Open งานที่ใช้เวลานานหลายวัน คุมเวลาไม่ได้
+         (เช่น ฮาร์ดแวร์เสียต้องส่งซ่อม/สั่งอะไหล่, ขอเบิก/จัดหาอุปกรณ์ใหม่)
+
+ตอบ JSON: {"level": "1"|"2"|"3"|"4"}"""
+
+
+async def estimate_level(title: str, description: str, priority: str | None = None) -> str | None:
+    """ประเมิน itamtv Level (1-4) จากอาการ — คืน '1'..'4' หรือ None ถ้าล้มเหลว."""
+    schema = {
+        "type": "object",
+        "properties": {"level": {"type": "string", "enum": ["1", "2", "3", "4"]}},
+        "required": ["level"],
+    }
+    hint = f"\n(ระบบประเมินความเร่งด่วนเบื้องต้นไว้: {priority})" if priority else ""
+    user = f"เรื่องที่แจ้ง: {title}\n\nรายละเอียด:\n{(description or '')[:1500]}{hint}"
+    try:
+        raw = await _post_chat(
+            [{"role": "system", "content": _LEVEL_PROMPT}, {"role": "user", "content": user}],
+            schema,
+        )
+        level = _parse_json(raw).get("level")
+    except (httpx.HTTPError, json.JSONDecodeError, KeyError, ValueError) as exc:
+        logger.warning("estimate_level failed: %s", exc)
+        return None
+    if level not in {"1", "2", "3", "4"}:
+        return None
+    logger.info("itamtv level → %s (%s)", level, title)
+    return level
+
+
+async def pick_option(what: str, options: list[tuple[str, str]], title: str,
+                      description: str) -> str | None:
+    """เลือก 1 ตัวเลือกจาก dropdown จริงของ itamtv — คืน value (None ถ้าล้มเหลว).
+
+    บังคับด้วย JSON Schema enum ของค่าที่มีจริง → โมเดลตอบค่าที่ไม่มีในระบบไม่ได้เลย
+    (เดิมยัด "อื่นๆ" ทุกเคส ทำให้รายงานแยกประเภทของ IT ใช้ไม่ได้)
+    """
+    if not options:
+        return None
+    listing = "\n".join(f"- {v}: {t}" for v, t in options if t.strip())
+    system = _PICK_PROMPT % {"what": what, "options": listing}
+    schema = {
+        "type": "object",
+        "properties": {"id": {"type": "string", "enum": [v for v, t in options if t.strip()]}},
+        "required": ["id"],
+    }
+    user = f"เรื่องที่แจ้ง: {title}\n\nรายละเอียด:\n{(description or '')[:1500]}"
+    try:
+        raw = await _post_chat(
+            [{"role": "system", "content": system}, {"role": "user", "content": user}],
+            schema,
+        )
+        picked = _parse_json(raw).get("id")
+    except (httpx.HTTPError, json.JSONDecodeError, KeyError, ValueError) as exc:
+        logger.warning("pick_option(%s) failed: %s", what, exc)
+        return None
+    if not any(v == picked for v, _ in options):
+        logger.warning("pick_option(%s) คืนค่านอกรายการ: %r", what, picked)
+        return None
+    label = next((t for v, t in options if v == picked), "")
+    logger.info("itamtv %s → %s (%s)", what, picked, label)
+    return picked
+
+
+# --------------------------------------------------------------------------
+# โหมดผู้ช่วยสำหรับ IT Staff — คุยได้ไม่จำกัด + เรียกเครื่องมือดูข้อมูล/สั่งการเคส
+# --------------------------------------------------------------------------
 
 STAFF_SYSTEM_PROMPT = """คุณเป็นผู้ช่วยส่วนตัวของเจ้าหน้าที่ IT (staff) ในระบบ Line IT Ticket
 คนที่คุยด้วยเป็นทีมงาน IT ที่ลงทะเบียนในระบบแล้ว — ตอบได้เต็มที่ ไม่ต้องจำกัดเหมือนคุยกับผู้ใช้ทั่วไป
 ตอบคำถามทั่วไป ช่วยคิด ช่วยสรุป และช่วยดู/จัดการเคสในระบบได้
 
-[เครื่องมือ]
-ถ้าต้องใช้ข้อมูลจริงจากระบบ (เคส/อุปกรณ์) หรือจะสั่งการเคส ให้ "เรียกเครื่องมือ" โดยตอบ JSON:
-{"action": "tool", "tool": "<ชื่อเครื่องมือ>", "args": {...}}
-เครื่องมือที่มี:
-%s
-ระบบจะรันเครื่องมือแล้วส่งผลลัพธ์กลับมาให้คุณในข้อความถัดไป (role=tool) — จากนั้นค่อยสรุปตอบ staff
-เรียกได้หลายครั้งต่อเนื่องถ้าจำเป็น
+ข้อมูลจริงทุกอย่าง (เคส/พนักงาน/อุปกรณ์/นโยบาย/แบบฟอร์ม) ต้องมาจากผลลัพธ์เครื่องมือเท่านั้น
+โดยเฉพาะคำถามแนว "ขั้นตอนขอใช้..., มีแบบฟอร์มไหม, นโยบายเรื่อง..." → เรียก search_kb ก่อนเสมอ
+ห้ามตอบว่า "ไม่มีในระบบ/ไปหาใน SharePoint เอง" ทั้งที่ยังไม่ได้ค้น — ไม่รู้ก็เรียกดูก่อน
+อย่าเดา และ "การพูดว่าทำให้แล้ว" ไม่มีผลกับระบบ ต้องเรียกเครื่องมือถึงจะเกิดขึ้นจริง
 
-⛔ กฎเหล็กกันมั่ว (สำคัญที่สุด):
-ทุกครั้งที่ต้องอ้างถึง "ข้อมูลจริง" — ชื่อพนักงาน, รหัสพนักงาน, จำนวนคน, แผนก, เลขเคส, สถานะเคส,
-อุปกรณ์ — คุณต้องได้ค่านั้นมาจากผลลัพธ์ role=tool ในบทสนทนานี้ "ก่อน" เท่านั้น
-- ห้ามแต่งชื่อ/นามสกุล/รหัสพนักงาน/จำนวน/แผนก ขึ้นมาเองเด็ดขาด แม้แต่ตัวอย่าง
-- ถ้ายังไม่มีผล role=tool ที่ตอบคำถามนี้ → ต้องตอบ action=tool เพื่อเรียกเครื่องมือก่อน ห้าม action=answer
-- รายงานได้เฉพาะรายการที่ปรากฏใน role=tool จริงเท่านั้น จำนวนคนต้องตรงกับ count/รายการที่ได้มา
-- ถ้าเครื่องมือคืน error/ว่าง → บอก staff ตรงๆ ว่าไม่พบ/ระบบขัดข้อง อย่าแต่งข้อมูลมาแทน
+คุยกระชับ เป็นกันเองแบบเพื่อนร่วมทีม ห้าม Markdown (LINE ไม่เรนเดอร์)
 
-[ตอบ staff]
-เมื่อพร้อมตอบ ให้ตอบ JSON: {"action": "answer", "reply": "<ข้อความ>"}
-- ห้าม Markdown (LINE ไม่เรนเดอร์), คุยกระชับ ตรงประเด็น เป็นกันเองแบบเพื่อนร่วมทีม
-- เวลารายงานเคสหลายใบ ให้สรุปเป็นบรรทัดสั้นๆ ต่อเคส (เลขเคส-สถานะ-หัวข้อ-ผู้แจ้ง)
-- ก่อนสั่ง set_status ที่กระทบเคสจริง ถ้าไม่ชัดว่า staff สั่งเคสไหน ให้ถามยืนยันก่อน (action=answer)
-
-[เปิดเคสแทนผู้ใช้ที่โทรมา]
-งานจริงผู้ใช้มักโทร/เดินมาบอก staff ตรงๆ ไม่ผ่านระบบ — ช่วย staff เปิดเคสจากที่เล่าให้ฟังเลย
-จะได้ไม่ต้องจำแล้วมากรอกทีหลัง:
-- เก็บให้ครบก่อนเปิด: ใครแจ้ง (ชื่อหรือรหัสพนักงาน) + ปัญหาอะไร + (ถ้ารู้) ตึก/ชั้น
-- ยืนยันตัวผู้แจ้งด้วย search_employees ก่อนเสมอ ถ้าเจอ 0 คนหรือหลายคน → ถามกลับให้ staff ระบุ
-  ให้ชัด (action=answer) ห้ามเดา/ห้ามมั่วรหัส
-- ได้ผู้แจ้งชัด + รู้ปัญหาแล้ว → สรุปสั้นๆ (ผู้แจ้ง/ปัญหา/หมวด/ความเร่งด่วน) แล้วถามยืนยัน
-  "เปิดเคสนี้เลยไหมครับ" (action=answer) — อย่าเพิ่งเรียก create_ticket
-- staff ยืนยัน → เรียก create_ticket. ระบบจะ assign เคสให้ staff คนที่สั่ง + ตั้ง in_progress เอง
-
-[งานเสร็จ]
-บอทตามถามความคืบหน้างานที่ staff รับไว้เป็นระยะ ถ้า staff บอกว่า "เสร็จแล้ว/ปิดได้/จบงาน":
-- ถ้ารู้ชัดว่าเคสไหน → ถามยืนยันปิดก่อน เช่น "ปิดเคส TK-... เลยไหมครับ" (action=answer)
-  staff ยืนยัน → เรียก set_status(status=resolved). staff จะกดปุ่มปิดจากการ์ดเองก็ได้
-- ถ้าไม่รู้ว่าเคสไหน → เรียก search_tickets(assignee='me', status='in_progress') หาเคสที่ค้างอยู่ก่อน
-  มีใบเดียวก็ยืนยันปิดใบนั้น หลายใบให้ถามว่าใบไหน
-
-ทุกคำตอบต้องเป็น JSON ตามรูปแบบข้างบนเท่านั้น ไม่มีข้อความนอก JSON"""
+[ก่อนลงมือกับเคสจริง]
+- ไม่ชัดว่าหมายถึงเคสไหน → ถามก่อน อย่าเดาเลขเคส
+- จะเปิดเคสแทนผู้ใช้ที่โทร/เดินมาแจ้ง: ยืนยันตัวผู้แจ้งด้วย search_employees ก่อนเสมอ
+  (เจอ 0 คนหรือหลายคน → ถามกลับให้ staff ระบุให้ชัด) แล้วสรุปให้ดูสั้นๆ ถามยืนยันก่อนเปิด
+- staff บอกว่า "เสร็จแล้ว/ปิดได้" แต่ไม่ระบุเคส → หาเคสที่เขาค้างอยู่ก่อนด้วย search_tickets
+- รู้เลขเคสแล้วและ staff สั่งให้ปิด/รับงาน → เรียก set_status ได้เลย ไม่ต้อง get_ticket ดูก่อน
+  (get_ticket แค่ "ดู" ไม่ได้เปลี่ยนอะไร — เรียกแล้วนึกว่าปิดให้แล้วคือความเข้าใจผิด)
+- ปิดเคส: ระบบจะถาม "ชี้แจงการแก้ไข" ให้เอง staff ตอบมาแล้วให้เรียก set_status อีกครั้ง
+  พร้อมส่ง resolution=<ข้อความที่เขาบอก> หรือ skip_resolution=true ถ้าเขาบอกว่าไม่ต้องระบุ"""
 
 
-def _staff_system() -> str:
-    tools = "\n".join(f"- {k}: {v}" for k, v in STAFF_TOOLS.items())
-    return STAFF_SYSTEM_PROMPT % tools
+def _staff_system(role: str = "staff") -> str:
+    prompt = STAFF_SYSTEM_PROMPT
+    if role == "supervisor":
+        prompt += ("\n\n[คนที่คุยด้วยตอนนี้] หัวหน้างาน — ไม่ได้ลงมือซ่อมเอง เปิดเคสแล้วมอบหมาย"
+                   "ให้ช่างได้ด้วย assign_to (ไม่ระบุ = ปล่อยให้ทีมรับเอง) ถามว่ามีช่างคนไหนบ้าง"
+                   "ให้ดูจาก list_staff")
+    else:
+        prompt += "\n\n[คนที่คุยด้วยตอนนี้] ช่างผู้ปฏิบัติ — เปิดเคสแล้วรับงานเอง ห้ามใส่ assign_to"
+    return prompt
 
 
-async def staff_turn(history: list[dict]) -> dict:
-    """เดินผู้ช่วย staff หนึ่ง turn. history = [{role, content}, ...] โดย role เป็น
-    user(staff) / assistant(บอท) / tool(ผลลัพธ์เครื่องมือที่ webhook เติมกลับเข้ามา).
+async def staff_turn(history: list[dict], role: str = "staff") -> dict:
+    """เดินผู้ช่วย staff หนึ่ง turn ด้วย native tool-calling ของ Ollama.
+
+    history = [{role, content}, ...] โดย role เป็น user(staff) / assistant(บอท) /
+    tool (ผลลัพธ์เครื่องมือที่ webhook เติมกลับเข้ามา — มี tool_name กำกับได้)
 
     คืน dict:
-      {"action": "tool", "tool": ..., "args": {...}}  → webhook รันเครื่องมือแล้วเรียกซ้ำ
-      {"action": "answer", "reply": ...}              → ส่งข้อความให้ staff แล้วจบ
+      {"action": "tools", "calls": [{"tool": ..., "args": {...}}, ...]}
+          → webhook รันทุกตัว (โมเดลขอมาหลายตัวในเทิร์นเดียวได้) แล้วเรียกซ้ำ
+      {"action": "answer", "reply": ...}  → ส่งข้อความให้ staff แล้วจบ
     """
+    messages: list[dict] = [{"role": "system", "content": _staff_system(role)}]
+    # transcript เก็บ tool call ของบอทเป็น "ข้อความ JSON" (เพราะ conversations เก็บได้แค่
+    # role+content) — ต้องแปลงกลับเป็นรูปแบบ native ก่อนป้อนโมเดล ไม่งั้นโมเดลอ่านประวัติ
+    # ไม่ออกว่าอะไรถูก "เรียกไปแล้ว/ได้ผลอะไร" แล้วจะสรุปเองว่าทำเสร็จแล้วทั้งที่ยังไม่ได้ทำ
+    last_tool: str | None = None
+    for m in history:
+        role_ = m["role"]
+        content = m["content"]
+        if role_ == "assistant":
+            call = _tool_call_from_text(content)
+            if call is not None:
+                last_tool = call["tool"]
+                messages.append({"role": "assistant", "content": "", "tool_calls": [
+                    {"function": {"name": call["tool"], "arguments": call["args"]}}
+                ]})
+                continue
+            last_tool = None
+        msg = {"role": role_, "content": content}
+        if role_ == "tool":
+            msg["tool_name"] = m.get("tool_name") or last_tool or ""
+        messages.append(msg)
+
     try:
-        raw = await _ollama_chat_messages(_staff_system(), history)
-        result = _parse_json(raw)
-    except (httpx.HTTPError, json.JSONDecodeError, KeyError) as exc:
+        out = await _post_chat_tools(messages, staff_agent.schemas())
+    except (httpx.HTTPError, KeyError) as exc:
         logger.warning("AI staff turn failed: %s", exc)
         return {"action": "answer",
                 "reply": "ตอนนี้ผู้ช่วยขัดข้องชั่วคราวครับ ลองใหม่อีกทีนะครับ 🙏"}
 
-    if result.get("action") == "tool" and result.get("tool") in STAFF_TOOLS:
-        args = result.get("args")
-        logger.info("staff_turn → tool=%s args=%s", result["tool"], args)
-        return {"action": "tool", "tool": result["tool"],
-                "args": args if isinstance(args, dict) else {}}
-    reply = result.get("reply") or "รับทราบครับ มีอะไรให้ช่วยอีกไหมครับ"
+    calls = []
+    for c in out.get("tool_calls") or []:
+        fn = c.get("function") or {}
+        if fn.get("name") not in staff_agent.TOOLS:
+            logger.warning("staff_turn: unknown tool %s", fn.get("name"))
+            continue
+        args = fn.get("arguments")
+        calls.append({"tool": fn["name"], "args": args if isinstance(args, dict) else {}})
+    if calls:
+        logger.info("staff_turn → %s", [(c["tool"], c["args"]) for c in calls])
+        return {"action": "tools", "calls": calls}
+
+    reply = (out.get("content") or "").strip() or "รับทราบครับ มีอะไรให้ช่วยอีกไหมครับ"
+    # บางครั้งโมเดล "พิมพ์" tool call ออกมาเป็นข้อความแทนที่จะเรียกจริง
+    # ({"tool": "set_status", "args": {...}}) — ถ้าปล่อยผ่าน staff จะเห็น JSON ดิบ
+    # และงานไม่ถูกทำ จึงแปลงกลับเป็นการเรียกจริง
+    typed = _tool_call_from_text(reply)
+    if typed is not None:
+        logger.info("staff_turn → %s (จาก content ไม่ใช่ tool_calls)", typed)
+        return {"action": "tools", "calls": [typed]}
     return {"action": "answer", "reply": clean_for_line(reply)}
+
+
+def _tool_call_from_text(text: str) -> dict | None:
+    """ถอด tool call ที่โมเดลพิมพ์เป็นข้อความ → {"tool", "args"} (None = ไม่ใช่)."""
+    if "{" not in text:
+        return None
+    try:
+        data = _parse_json(text)
+    except (json.JSONDecodeError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    name = data.get("tool") or data.get("name") or data.get("function")
+    if isinstance(name, dict):  # รูปแบบ {"function": {"name": ..., "arguments": {...}}}
+        data = name
+        name = data.get("name")
+    if name not in staff_agent.TOOLS:
+        return None
+    args = data.get("args") or data.get("arguments") or data.get("parameters")
+    return {"tool": name, "args": args if isinstance(args, dict) else {}}

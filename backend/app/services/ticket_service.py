@@ -121,7 +121,7 @@ def _ticket_dict(t: Ticket) -> dict:
     """สรุป ticket หนึ่งใบเป็น dict ให้ staff assistant อ่าน (มีชื่อผู้แจ้ง/ผู้ดูแล)."""
     lu = t.line_user
     # ผู้แจ้ง: LINE user ถ้ามี, ไม่งั้น fallback ผู้แจ้ง phone-in ที่ staff เปิดแทน
-    reporter = (lu.emp_name or lu.display_name) if lu else t.reporter_name
+    reporter = lu.known_name if lu else t.reporter_name
     department = (lu.department if lu else None) or (t.reporter_detail if not lu else None)
     return {
         "ticket_no": t.ticket_no,
@@ -178,17 +178,44 @@ def _brief(text: str, limit: int = 500) -> str:
 
 
 def group_notify_text(ticket: Ticket) -> str:
+    return group_notify(ticket)[0]
+
+
+def group_notify(ticket: Ticket) -> tuple[str, dict[str, str]]:
+    """ข้อความแจ้งกลุ่ม IT + mentions ({label → LINE userId}) สำหรับ @ เรียกผู้รับมอบหมาย.
+
+    ผู้รับมอบหมายที่ยังไม่ผูก LINE (หรือยังไม่มอบหมาย) → ไม่มี mention, ขึ้นข้อความชวน
+    ให้ทีมกดรับงานแทน.
+    """
     lu = ticket.line_user
     # เคส phone-in ไม่มี line_user → ใช้ชื่อ/รายละเอียดผู้แจ้งที่ staff กรอกไว้แทน
-    who = (lu.display_name if lu else ticket.reporter_name) or "-"
+    who = (lu.known_name if lu else ticket.reporter_name) or "-"
     dept = ((lu.department or "-") if lu else (ticket.reporter_detail or "-")) or "-"
     loc = ""
     if lu and (lu.building or lu.floor):
         loc = f" ({lu.building or ''}-{lu.floor or ''})"
-    return (
+
+    assignee = ticket.assignee
+    mentions: dict[str, str] = {}
+    ping = ""
+    if assignee is not None:
+        name = assignee.display_name or assignee.username
+        owner = f"👷 ผู้รับผิดชอบ: {name}\n"
+        # บรรทัด ping ท้ายข้อความ — @ ไว้เรียกใน LINE group (ชื่อในรายละเอียดคงรูปเดิม)
+        if assignee.line_user_id:
+            label = f"@{name}"
+            mentions[label] = assignee.line_user_id
+            ping = f"\n\n🔔 {label} รับเรื่องด้วยครับ"
+    else:
+        owner = "👷 ผู้รับผิดชอบ: ยังไม่มอบหมาย — ใครสะดวกกดรับงานได้เลยครับ\n"
+
+    text = (
         f"🎫 Ticket ใหม่: {ticket.ticket_no}\n"
         f"👤 ผู้แจ้ง: {who} ({dept}){loc}\n"
         f"📂 หมวด: {ticket.category}\n"
         f"🔴 Priority: {ticket.priority}\n"
+        f"{owner}"
         f"📝 {_brief(ticket.description or ticket.title)}"
+        f"{ping}"
     )
+    return text, mentions
