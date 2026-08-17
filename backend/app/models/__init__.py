@@ -8,6 +8,7 @@ from app.models.ticket_followup import TicketFollowup
 from app.models.equipment_request import EquipmentRequest
 from app.models.bot_message import BotMessage
 from app.models.conversation import Conversation
+from app.models.approval import ApprovalRequest, DepartmentApprover
 from app.models.kb_chunk import KbChunk
 from app.models.app_setting import AppSetting
 from app.models.service_form import ServiceForm
@@ -26,4 +27,6 @@ __all__ = [
     "TicketComment",
     "TicketFollowup",
     "EquipmentRequest",
+    "ApprovalRequest",
+    "DepartmentApprover",
 ]
