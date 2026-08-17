@@ -14,7 +14,7 @@ from app.core.database import get_db
 from app.models.service_form import ServiceForm
 from app.schemas.form import PublicFormOut
 from app.schemas.liff import FormSubmitIn, ServiceRequestOut
-from app.services import line_service, ticket_service
+from app.services import approval_service, itamtv_service, line_service, ticket_service
 
 logger = logging.getLogger(__name__)
 
@@ -55,7 +55,7 @@ async def submit_form(slug: str, payload: FormSubmitIn, db: Session = Depends(ge
     )
     # field มาตรฐานที่ map เข้าโปรไฟล์ผู้แจ้งได้ → อัปเดต line_users
     if values.get("full_name"):
-        lu.display_name = values["full_name"][:100]
+        lu.self_name = values["full_name"][:100]
     if values.get("building"):
         lu.building = values["building"][:100]
     if values.get("floor"):
@@ -64,9 +64,29 @@ async def submit_form(slug: str, payload: FormSubmitIn, db: Session = Depends(ge
     # ประกอบ description จาก label+value ตามลำดับ field
     lines = [f"{f['label']}: {values.get(f['key'], '-')}" for f in form.fields]
     description = f"{form.name}\n" + "\n".join(lines)
-    requester = values.get("full_name") or lu.display_name or "-"
+    requester = values.get("full_name") or lu.known_name or "-"
 
-    is_approval = form.category in APPROVAL_CATEGORIES
+    # ข้อมูลผู้ขอจาก Employee DB (สดทุกครั้ง) — ใช้หาผู้อนุมัติตามแผนก/ตำแหน่ง
+    emp: dict = {}
+    if lu.emp_code:
+        try:
+            emp = await itamtv_service.lookup_employee_exact(emp_code=lu.emp_code) or {}
+        except Exception:  # noqa: BLE001
+            logger.exception("lookup requester for approval failed")
+    requester_info = {
+        "emp_code": lu.emp_code,
+        "name": emp.get("name") or requester,
+        "department": emp.get("department") or lu.department,
+        "position": emp.get("position") or lu.position,
+    }
+
+    # ต้องขออนุมัติไหม — ตัดสินจากกฎบนฟอร์ม (โครงสร้าง) ไม่ใช่ข้อความใน KB
+    needs_approval = bool(form.requires_approval) or form.category in APPROVAL_CATEGORIES
+    self_approved = needs_approval and approval_service.can_self_approve(
+        form, requester_info.get("position")
+    )
+    is_approval = needs_approval and not self_approved
+
     ticket = ticket_service.create_ticket(
         db,
         title=f"{form.name} — {requester}",
@@ -79,12 +99,19 @@ async def submit_form(slug: str, payload: FormSubmitIn, db: Session = Depends(ge
     )
     db.commit()
 
-    await line_service.notify_group(ticket_service.group_notify_text(ticket))
-    tail = (
-        "ทีม IT จะตรวจสอบและอนุมัติ แล้วแจ้งกลับให้ทราบครับ"
-        if is_approval
-        else "ทีม IT จะรีบดำเนินการให้ครับ"
-    )
+    if is_approval:
+        req = await approval_service.start_approval(
+            db, ticket, form, requester_info, summary=description[:300]
+        )
+        if req.status == "pending" and req.approver_line_user_id:
+            tail = f"ส่งให้ {req.approver_name or 'ผู้อนุมัติ'} พิจารณาแล้ว รอผลอนุมัติครับ"
+        else:
+            tail = "ทีม IT จะช่วยตามเรื่องอนุมัติให้ครับ"
+    else:
+        await line_service.notify_group(*ticket_service.group_notify(ticket))
+        tail = ("ระดับของคุณอนุมัติได้เอง ทีม IT จะดำเนินการต่อให้เลยครับ"
+                if self_approved else "ทีม IT จะรีบดำเนินการให้ครับ")
+
     await line_service.push(
         line_user_id,
         f"รับคำขอ “{form.name}” ของคุณแล้วครับ 🙏\nหมายเลข Ticket: {ticket.ticket_no}\n{tail}",

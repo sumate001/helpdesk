@@ -23,6 +23,11 @@ class ServiceForm(Base):
     category: Mapped[str | None] = mapped_column(String(50))  # map เข้ากับ category ticket
     priority: Mapped[str] = mapped_column(String(20), default="low")
     fields: Mapped[list] = mapped_column(JSON, default=list)
+    # กฎอนุมัติ — บังคับด้วยโค้ด ไม่ใช่ข้อความใน KB (KB อธิบายให้คนอ่าน ระบบตัดสินเอง)
+    requires_approval: Mapped[bool] = mapped_column(Boolean, default=False)
+    approver_rule: Mapped[str] = mapped_column(String(20), default="supervisor")  # supervisor|fixed
+    self_approve_positions: Mapped[list | None] = mapped_column(JSON)  # ตำแหน่งที่อนุมัติตัวเองได้
+    fixed_approver_emp_code: Mapped[str | None] = mapped_column(String(20))
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime)
     updated_at: Mapped[datetime] = mapped_column(DateTime)

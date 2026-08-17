@@ -17,6 +17,10 @@ const EMPTY = {
   priority: "low",
   is_active: true,
   fields: [],
+  requires_approval: false,
+  approver_rule: "supervisor",
+  self_approve_positions: "",
+  fixed_approver_emp_code: "",
 };
 
 // เทมเพลตตั้งต้น — กด "ใช้เทมเพลตนี้" เพื่อสำเนามาแก้ชื่อ/slug/field ต่อได้ทันที
@@ -46,16 +50,22 @@ const toFormState = (data) => ({
   ...data,
   description: data.description || "",
   category: data.category || "",
+  requires_approval: !!data.requires_approval,
+  approver_rule: data.approver_rule || "supervisor",
+  // เก็บใน DB เป็น array แต่กรอกในหน้าเป็นข้อความคั่นด้วย comma อ่านง่ายกว่า
+  self_approve_positions: (data.self_approve_positions || []).join(", "),
+  fixed_approver_emp_code: data.fixed_approver_emp_code || "",
   fields: data.fields.map((x) => ({ ...x, optionsText: (x.options || []).join(", ") })),
 });
 
 // จัดการแบบฟอร์ม LIFF — สร้าง/แก้ฟอร์ม + กำหนด field เอง. onChange แจ้ง parent ให้ refresh dropdown
-export default function FormsManager({ onChange }) {
+// embedded = ใช้เป็นเนื้อหาของแท็บ (กางอยู่แล้ว ไม่ต้องมีหัวข้อพับ/กาง)
+export default function FormsManager({ onChange, embedded = false }) {
   const [forms, setForms] = useState([]);
   const [form, setForm] = useState(EMPTY);
   const [editingId, setEditingId] = useState(null);
   const [error, setError] = useState("");
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState(embedded);
   const [dragIndex, setDragIndex] = useState(null);
 
   const load = () =>
@@ -114,6 +124,12 @@ export default function FormsManager({ onChange }) {
                   .filter(Boolean)
               : null,
         })),
+        // ข้อความคั่น comma → array ตามที่ API รับ (ว่าง = ไม่มีใครอนุมัติตัวเองได้)
+        self_approve_positions: (form.self_approve_positions || "")
+          .split(",")
+          .map((x) => x.trim())
+          .filter(Boolean),
+        fixed_approver_emp_code: form.fixed_approver_emp_code || null,
       };
       if (editingId) await api.patch(`/forms/${editingId}`, payload);
       else await api.post("/forms", payload);
@@ -164,18 +180,20 @@ export default function FormsManager({ onChange }) {
 
   return (
     <div className="glass rounded-xl">
-      <button
-        onClick={() => setOpen(!open)}
-        className="w-full flex items-center justify-between px-4 py-3 text-left"
-      >
-        <span className="font-semibold text-slate-100">
-          แบบฟอร์มขอใช้บริการ (LIFF) — {forms.length} ฟอร์ม
-        </span>
-        <span className="text-slate-500">{open ? "▲" : "▼"}</span>
-      </button>
+      {!embedded && (
+        <button
+          onClick={() => setOpen(!open)}
+          className="w-full flex items-center justify-between px-4 py-3 text-left"
+        >
+          <span className="font-semibold text-slate-100">
+            แบบฟอร์มขอใช้บริการ (LIFF) — {forms.length} ฟอร์ม
+          </span>
+          <span className="text-slate-500">{open ? "▲" : "▼"}</span>
+        </button>
+      )}
 
       {open && (
-        <div className="px-4 pb-4 space-y-5 border-t border-white/10 pt-4">
+        <div className={`px-4 pb-4 space-y-5 ${embedded ? "pt-4" : "border-t border-white/10 pt-4"}`}>
           {/* ── ส่วนที่ 1: รายการฟอร์มที่มีอยู่ ── */}
           <section>
             <div className="flex items-center justify-between mb-2">
@@ -400,6 +418,61 @@ export default function FormsManager({ onChange }) {
               />
               เปิดใช้งาน
             </label>
+            {/* ── กฎการอนุมัติ — บังคับด้วยระบบ ไม่ใช่ข้อความใน KB ── */}
+            <div className="ring-1 ring-white/10 rounded-lg p-3 space-y-3">
+              <label className="flex items-center gap-2 text-sm text-slate-200">
+                <input
+                  type="checkbox"
+                  checked={form.requires_approval}
+                  onChange={(e) => setForm({ ...form, requires_approval: e.target.checked })}
+                />
+                🔐 ต้องขออนุมัติก่อนส่งให้ทีม IT
+              </label>
+              {form.requires_approval && (
+                <div className="space-y-3 pl-6">
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                    <label className="text-xs text-slate-400">
+                      ใครอนุมัติ
+                      <select
+                        className="input-dark w-full rounded-lg px-3 py-2 text-sm mt-1"
+                        value={form.approver_rule}
+                        onChange={(e) => setForm({ ...form, approver_rule: e.target.value })}
+                      >
+                        <option value="supervisor">หัวหน้าตามแผนกของผู้ขอ (ผังผู้อนุมัติ)</option>
+                        <option value="fixed">คนเดียวตายตัว (ระบุรหัสพนักงาน)</option>
+                      </select>
+                    </label>
+                    {form.approver_rule === "fixed" && (
+                      <label className="text-xs text-slate-400">
+                        รหัสพนักงานผู้อนุมัติ
+                        <input
+                          className="input-dark w-full rounded-lg px-3 py-2 text-sm mt-1"
+                          value={form.fixed_approver_emp_code}
+                          onChange={(e) =>
+                            setForm({ ...form, fixed_approver_emp_code: e.target.value })
+                          }
+                        />
+                      </label>
+                    )}
+                  </div>
+                  <label className="text-xs text-slate-400 block">
+                    ตำแหน่งที่อนุมัติตัวเองได้ (คั่นด้วย , — เว้นว่าง = ทุกคนต้องขออนุมัติ)
+                    <input
+                      className="input-dark w-full rounded-lg px-3 py-2 text-sm mt-1"
+                      placeholder="เช่น ผู้จัดการ, ผู้อำนวยการ, Manager"
+                      value={form.self_approve_positions}
+                      onChange={(e) =>
+                        setForm({ ...form, self_approve_positions: e.target.value })
+                      }
+                    />
+                  </label>
+                  <p className="text-xs text-slate-500">
+                    ตั้งผังหัวหน้าแต่ละแผนกได้ที่เมนู “การอนุมัติ” — ผู้อนุมัติต้องผูก LINE
+                    กับระบบถึงจะกดปุ่มอนุมัติได้
+                  </p>
+                </div>
+              )}
+            </div>
             {error && <p className="text-sm text-red-400">{error}</p>}
             <div className="flex gap-2">
               <button className="btn-primary text-sm px-4 py-1.5 rounded-lg font-medium">

@@ -43,6 +43,10 @@ def create_form(
         priority=payload.priority,
         fields=_dump_fields(payload.fields),
         is_active=payload.is_active,
+        requires_approval=payload.requires_approval,
+        approver_rule=payload.approver_rule,
+        self_approve_positions=payload.self_approve_positions,
+        fixed_approver_emp_code=payload.fixed_approver_emp_code,
         created_at=now,
         updated_at=now,
     )

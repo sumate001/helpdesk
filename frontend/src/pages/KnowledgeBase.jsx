@@ -14,7 +14,13 @@ const CATEGORIES = [
 
 const EMPTY_FORM = { title: "", category: "", source: "", content: "", form_id: "" };
 
+const TABS = [
+  { key: "kb", label: "ความรู้ (KB)" },
+  { key: "forms", label: "แบบฟอร์ม" },
+];
+
 export default function KnowledgeBase() {
+  const [tab, setTab] = useState("kb");
   const [chunks, setChunks] = useState([]);
   const [forms, setForms] = useState([]);
   const [form, setForm] = useState(EMPTY_FORM);
@@ -93,15 +99,39 @@ export default function KnowledgeBase() {
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <h1 className="text-2xl font-bold text-glow">คลังความรู้ (KB) สำหรับ AI</h1>
-        <span className="text-sm text-slate-500">{chunks.length} รายการ</span>
+        <span className="text-sm text-slate-500">
+          {tab === "kb" ? `${chunks.length} รายการ` : `${forms.length} ฟอร์ม`}
+        </span>
       </div>
+
+      {/* แท็บ: ความรู้ กับ แบบฟอร์ม เป็นคนละงาน ไม่ต้องเลื่อนผ่านกัน */}
+      <div className="flex gap-1 border-b border-white/10">
+        {TABS.map((t) => (
+          <button
+            key={t.key}
+            onClick={() => setTab(t.key)}
+            className={`px-4 py-2 text-sm font-medium -mb-px border-b-2 transition-colors ${
+              tab === t.key
+                ? "border-indigo-400 text-indigo-300"
+                : "border-transparent text-slate-400 hover:text-slate-200"
+            }`}
+          >
+            {t.label}
+          </button>
+        ))}
+      </div>
+
+      {/* แบบฟอร์ม — mount ไว้ตลอดแม้อยู่แท็บอื่น เพื่อให้ dropdown "ผูกแบบฟอร์ม" มีข้อมูล
+          และงานที่แก้ค้างไว้ไม่หายเมื่อสลับแท็บ */}
+      <div className={tab === "forms" ? "" : "hidden"}>
+        <FormsManager onChange={setForms} embedded />
+      </div>
+
+      <div className={tab === "kb" ? "space-y-6" : "hidden"}>
       <p className="text-sm text-slate-400">
         ความรู้ระบบ/นโยบาย IT ที่ AI ใช้ตอบและตัดสินว่าต้องเปิดเคสไหม — แนะนำ 1 หัวข้อ/1 รายการ
         เขียนให้ชัดว่าเรื่องไหน "ตอบได้เลย" หรือ "ต้องขออนุมัติ/ให้ IT ดำเนินการ"
       </p>
-
-      {/* จัดการแบบฟอร์ม LIFF */}
-      <FormsManager onChange={setForms} />
 
       {/* ฟอร์มเพิ่ม/แก้ */}
       <form onSubmit={submit} className="glass rounded-xl p-4 space-y-3">
@@ -232,6 +262,7 @@ export default function KnowledgeBase() {
             </div>
           </div>
         ))}
+      </div>
       </div>
     </div>
   );

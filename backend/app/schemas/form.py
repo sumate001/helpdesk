@@ -20,6 +20,10 @@ class ServiceFormCreate(BaseModel):
     priority: str = "low"
     fields: list[FormField] = []
     is_active: bool = True
+    requires_approval: bool = False
+    approver_rule: Literal["supervisor", "fixed"] = "supervisor"
+    self_approve_positions: list[str] | None = None
+    fixed_approver_emp_code: str | None = None
 
 
 class ServiceFormUpdate(BaseModel):
@@ -30,6 +34,10 @@ class ServiceFormUpdate(BaseModel):
     priority: str | None = None
     fields: list[FormField] | None = None
     is_active: bool | None = None
+    requires_approval: bool | None = None
+    approver_rule: Literal["supervisor", "fixed"] | None = None
+    self_approve_positions: list[str] | None = None
+    fixed_approver_emp_code: str | None = None
 
 
 class ServiceFormOut(BaseModel):
@@ -43,6 +51,10 @@ class ServiceFormOut(BaseModel):
     priority: str
     fields: list[FormField]
     is_active: bool
+    requires_approval: bool = False
+    approver_rule: str = "supervisor"
+    self_approve_positions: list[str] | None = None
+    fixed_approver_emp_code: str | None = None
     created_at: datetime
     updated_at: datetime
 
